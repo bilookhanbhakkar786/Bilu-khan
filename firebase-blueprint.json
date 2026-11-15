@@ -1,0 +1,497 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user profile stored under users/{userId}. Timestamps use FieldValue.serverTimestamp().",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Firebase Auth UID of the user." },
+        "fullName": { "type": "string" },
+        "email": { "type": "string" },
+        "phone": { "type": "string" },
+        "avatarUrl": { "type": "string", "description": "Optional profile image URL or compact JPEG data URI." },
+        "accountIntent": { "type": "string", "enum": ["principal", "teacher", "student"] },
+        "activeSchoolId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Submitted via FieldValue.serverTimestamp()." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Submitted via FieldValue.serverTimestamp()." }
+      },
+      "required": ["userId", "fullName", "email", "phone", "accountIntent", "createdAt", "updatedAt"]
+    },
+    "PrincipalLock": {
+      "title": "PrincipalLock",
+      "description": "Immutable 1-school-per-principal lock stored under principal_locks/{userId}.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "schoolId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "schoolId", "createdAt"]
+    },
+    "SchoolDirectoryEntry": {
+      "title": "SchoolDirectoryEntry",
+      "description": "Public non-PII school directory entry keyed by schoolCode for student discovery.",
+      "type": "object",
+      "properties": {
+        "schoolId": { "type": "string" },
+        "schoolCode": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "name": { "type": "string" },
+        "schoolType": { "type": "string", "enum": ["Private", "Government", "Other"] },
+        "city": { "type": "string" },
+        "isPublic": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["schoolId", "schoolCode", "ownerId", "name", "schoolType", "city", "isPublic", "createdAt", "updatedAt"]
+    },
+    "School": {
+      "title": "School",
+      "description": "Digital school profile owned by a single Principal under schools/{schoolId}.",
+      "type": "object",
+      "properties": {
+        "schoolCode": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "name": { "type": "string" },
+        "schoolType": { "type": "string", "enum": ["Private", "Government", "Other"] },
+        "address": { "type": "string" },
+        "city": { "type": "string" },
+        "contactNumber": { "type": "string" },
+        "email": { "type": "string" },
+        "description": { "type": "string" },
+        "establishedYear": { "type": "integer" },
+        "website": { "type": "string" },
+        "logoUrl": { "type": "string" },
+        "bannerUrl": { "type": "string" },
+        "galleryUrls": { "type": "array" },
+        "timezone": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "staffUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["schoolCode", "ownerId", "name", "schoolType", "address", "city", "contactNumber", "email", "description", "galleryUrls", "timezone", "memberUids", "staffUids", "createdAt", "updatedAt"]
+    },
+    "SchoolMembership": {
+      "title": "SchoolMembership",
+      "description": "Authoritative role record under schools/{schoolId}/members/{memberUid}.",
+      "type": "object",
+      "properties": {
+        "schoolId": { "type": "string" },
+        "schoolOwnerId": { "type": "string" },
+        "userId": { "type": "string" },
+        "role": { "type": "string", "enum": ["principal", "teacher", "student"] },
+        "status": { "type": "string", "enum": ["active", "suspended"] },
+        "inviteCode": { "type": "string" },
+        "linkedStudentId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["schoolId", "schoolOwnerId", "userId", "role", "status", "createdAt", "updatedAt"]
+    },
+    "TeacherInvitation": {
+      "title": "TeacherInvitation",
+      "description": "Principal-issued teacher invitation stored at teacher_invitations/{inviteCode}.",
+      "type": "object",
+      "properties": {
+        "schoolId": { "type": "string" },
+        "schoolName": { "type": "string" },
+        "schoolOwnerId": { "type": "string" },
+        "email": { "type": "string" },
+        "emailLower": { "type": "string" },
+        "fullName": { "type": "string" },
+        "phone": { "type": "string" },
+        "inviteCode": { "type": "string" },
+        "permissions": { "type": "object" },
+        "status": { "type": "string", "enum": ["pending", "accepted", "revoked"] },
+        "invitedBy": { "type": "string" },
+        "acceptedByUid": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["schoolId", "schoolName", "schoolOwnerId", "email", "emailLower", "fullName", "phone", "inviteCode", "permissions", "status", "invitedBy", "createdAt", "updatedAt"]
+    },
+    "TeacherProfile": {
+      "title": "TeacherProfile",
+      "description": "Verified teacher profile and permission matrix inside a school.",
+      "type": "object",
+      "properties": {
+        "schoolId": { "type": "string" },
+        "schoolOwnerId": { "type": "string" },
+        "userId": { "type": "string" },
+        "fullName": { "type": "string" },
+        "email": { "type": "string" },
+        "phone": { "type": "string" },
+        "avatarUrl": { "type": "string" },
+        "joiningDate": { "type": "string" },
+        "isActive": { "type": "boolean" },
+        "permissions": { "type": "object" },
+        "staffUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["schoolId", "schoolOwnerId", "userId", "fullName", "email", "phone", "joiningDate", "isActive", "permissions", "staffUids", "createdAt", "updatedAt"]
+    },
+    "TeacherAssignment": {
+      "title": "TeacherAssignment",
+      "description": "Subject and section assignment for a teacher in a specific academic session.",
+      "type": "object",
+      "properties": {
+        "schoolId": { "type": "string" },
+        "schoolOwnerId": { "type": "string" },
+        "sessionId": { "type": "string" },
+        "teacherProfileId": { "type": "string" },
+        "sectionId": { "type": "string" },
+        "subject": { "type": "string" },
+        "staffUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["schoolId", "schoolOwnerId", "sessionId", "teacherProfileId", "sectionId", "subject", "staffUids", "createdAt", "updatedAt"]
+    },
+    "AcademicSession": {
+      "title": "AcademicSession",
+      "description": "Academic year container (e.g., 2025-2026) isolating classes and records.",
+      "type": "object",
+      "properties": {
+        "schoolId": { "type": "string" },
+        "schoolOwnerId": { "type": "string" },
+        "name": { "type": "string" },
+        "startDate": { "type": "string" },
+        "endDate": { "type": "string" },
+        "isCurrent": { "type": "boolean" },
+        "staffUids": { "type": "array" },
+        "memberUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["schoolId", "schoolOwnerId", "name", "isCurrent", "staffUids", "memberUids", "createdAt", "updatedAt"]
+    },
+    "SchoolClass": {
+      "title": "SchoolClass",
+      "description": "Class level scoped to an academic session.",
+      "type": "object",
+      "properties": {
+        "schoolId": { "type": "string" },
+        "schoolOwnerId": { "type": "string" },
+        "sessionId": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "staffUids": { "type": "array" },
+        "memberUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["schoolId", "schoolOwnerId", "sessionId", "name", "description", "staffUids", "memberUids", "createdAt", "updatedAt"]
+    },
+    "ClassSection": {
+      "title": "ClassSection",
+      "description": "Section (A, B, C, etc.) belonging to a class and academic session.",
+      "type": "object",
+      "properties": {
+        "schoolId": { "type": "string" },
+        "schoolOwnerId": { "type": "string" },
+        "sessionId": { "type": "string" },
+        "classId": { "type": "string" },
+        "name": { "type": "string" },
+        "classTeacherId": { "type": "string" },
+        "description": { "type": "string" },
+        "staffUids": { "type": "array" },
+        "memberUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["schoolId", "schoolOwnerId", "sessionId", "classId", "name", "description", "staffUids", "memberUids", "createdAt", "updatedAt"]
+    },
+    "StudentRecord": {
+      "title": "StudentRecord",
+      "description": "Session-scoped student enrollment record with optional linkedUserId after approval.",
+      "type": "object",
+      "properties": {
+        "schoolId": { "type": "string" },
+        "schoolOwnerId": { "type": "string" },
+        "sessionId": { "type": "string" },
+        "classId": { "type": "string" },
+        "sectionId": { "type": "string" },
+        "studentCode": { "type": "string" },
+        "rollNumber": { "type": "string" },
+        "fullName": { "type": "string" },
+        "fatherName": { "type": "string" },
+        "dateOfBirth": { "type": "string" },
+        "gender": { "type": "string" },
+        "parentName": { "type": "string" },
+        "parentContact": { "type": "string" },
+        "address": { "type": "string" },
+        "admissionDate": { "type": "string" },
+        "email": { "type": "string" },
+        "avatarUrl": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "promoted", "graduated", "inactive"] },
+        "previousRecordId": { "type": "string" },
+        "linkedUserId": { "type": "string" },
+        "staffUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["schoolId", "schoolOwnerId", "sessionId", "classId", "sectionId", "studentCode", "rollNumber", "fullName", "fatherName", "gender", "parentName", "parentContact", "address", "admissionDate", "status", "staffUids", "createdAt", "updatedAt"]
+    },
+    "StudentAccountRequest": {
+      "title": "StudentAccountRequest",
+      "description": "Student connection verification request under schools/{schoolId}/student_requests/{userId}.",
+      "type": "object",
+      "properties": {
+        "schoolId": { "type": "string" },
+        "schoolOwnerId": { "type": "string" },
+        "schoolName": { "type": "string" },
+        "userId": { "type": "string" },
+        "studentId": { "type": "string" },
+        "sessionId": { "type": "string" },
+        "classId": { "type": "string" },
+        "sectionId": { "type": "string" },
+        "requestedRollNumber": { "type": "string" },
+        "requestedFullName": { "type": "string" },
+        "requestedFatherName": { "type": "string" },
+        "requestedSessionName": { "type": "string" },
+        "requestedClassName": { "type": "string" },
+        "requestedSectionName": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "staffUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["schoolId", "schoolOwnerId", "schoolName", "userId", "requestedRollNumber", "requestedFullName", "requestedFatherName", "requestedSessionName", "requestedClassName", "requestedSectionName", "status", "createdAt", "updatedAt"]
+    },
+    "AttendanceSession": {
+      "title": "AttendanceSession",
+      "description": "Daily or subject-period attendance taking session.",
+      "type": "object",
+      "properties": {
+        "schoolId": { "type": "string" },
+        "schoolOwnerId": { "type": "string" },
+        "sessionId": { "type": "string" },
+        "classId": { "type": "string" },
+        "sectionId": { "type": "string" },
+        "attendanceDate": { "type": "string" },
+        "subject": { "type": "string" },
+        "sessionSlot": { "type": "string" },
+        "teacherId": { "type": "string" },
+        "teacherName": { "type": "string" },
+        "staffUids": { "type": "array" },
+        "memberUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["schoolId", "schoolOwnerId", "sessionId", "classId", "sectionId", "attendanceDate", "subject", "sessionSlot", "teacherName", "staffUids", "memberUids", "createdAt", "updatedAt"]
+    },
+    "AttendanceRecord": {
+      "title": "AttendanceRecord",
+      "description": "Individual student attendance status and audit edit history.",
+      "type": "object",
+      "properties": {
+        "schoolId": { "type": "string" },
+        "schoolOwnerId": { "type": "string" },
+        "attendanceSessionId": { "type": "string" },
+        "studentId": { "type": "string" },
+        "linkedUserId": { "type": "string" },
+        "status": { "type": "string", "enum": ["present", "absent", "leave"] },
+        "note": { "type": "string" },
+        "updatedBy": { "type": "string" },
+        "editHistory": { "type": "array" },
+        "staffUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["schoolId", "schoolOwnerId", "attendanceSessionId", "studentId", "status", "note", "editHistory", "staffUids", "createdAt", "updatedAt"]
+    },
+    "TestExam": {
+      "title": "TestExam",
+      "description": "Exam/test definition scoped to a class section and academic session.",
+      "type": "object",
+      "properties": {
+        "schoolId": { "type": "string" },
+        "schoolOwnerId": { "type": "string" },
+        "sessionId": { "type": "string" },
+        "classId": { "type": "string" },
+        "sectionId": { "type": "string" },
+        "name": { "type": "string" },
+        "subject": { "type": "string" },
+        "testDate": { "type": "string" },
+        "totalMarks": { "type": "number" },
+        "passingMarks": { "type": "number" },
+        "description": { "type": "string" },
+        "status": { "type": "string", "enum": ["draft", "submitted", "published"] },
+        "createdBy": { "type": "string" },
+        "approvedBy": { "type": "string" },
+        "staffUids": { "type": "array" },
+        "memberUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["schoolId", "schoolOwnerId", "sessionId", "classId", "sectionId", "name", "subject", "testDate", "totalMarks", "passingMarks", "description", "status", "staffUids", "memberUids", "createdAt", "updatedAt"]
+    },
+    "TestResult": {
+      "title": "TestResult",
+      "description": "Student marks, grade, pass/fail, and rank for a test.",
+      "type": "object",
+      "properties": {
+        "schoolId": { "type": "string" },
+        "schoolOwnerId": { "type": "string" },
+        "testId": { "type": "string" },
+        "studentId": { "type": "string" },
+        "linkedUserId": { "type": "string" },
+        "obtainedMarks": { "type": "number" },
+        "percentage": { "type": "number" },
+        "grade": { "type": "string" },
+        "passed": { "type": "boolean" },
+        "rank": { "type": "integer" },
+        "enteredBy": { "type": "string" },
+        "staffUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["schoolId", "schoolOwnerId", "testId", "studentId", "obtainedMarks", "percentage", "grade", "passed", "staffUids", "createdAt", "updatedAt"]
+    },
+    "AnnouncementPost": {
+      "title": "AnnouncementPost",
+      "description": "School-wide or class-specific post/announcement.",
+      "type": "object",
+      "properties": {
+        "schoolId": { "type": "string" },
+        "schoolOwnerId": { "type": "string" },
+        "sessionId": { "type": "string" },
+        "classId": { "type": "string" },
+        "sectionId": { "type": "string" },
+        "scope": { "type": "string", "enum": ["school", "class"] },
+        "category": { "type": "string" },
+        "title": { "type": "string" },
+        "body": { "type": "string" },
+        "imageUrl": { "type": "string" },
+        "allowComments": { "type": "boolean" },
+        "likesCount": { "type": "integer" },
+        "publisherId": { "type": "string" },
+        "publisherName": { "type": "string" },
+        "staffUids": { "type": "array" },
+        "memberUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["schoolId", "schoolOwnerId", "scope", "category", "title", "body", "allowComments", "likesCount", "publisherId", "publisherName", "staffUids", "memberUids", "createdAt", "updatedAt"]
+    },
+    "AnnouncementComment": {
+      "title": "AnnouncementComment",
+      "description": "Comment on an announcement post.",
+      "type": "object",
+      "properties": {
+        "schoolId": { "type": "string" },
+        "schoolOwnerId": { "type": "string" },
+        "announcementId": { "type": "string" },
+        "userId": { "type": "string" },
+        "authorName": { "type": "string" },
+        "body": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["schoolId", "schoolOwnerId", "announcementId", "userId", "authorName", "body", "memberUids", "createdAt", "updatedAt"]
+    },
+    "AnnouncementLike": {
+      "title": "AnnouncementLike",
+      "description": "Per-user like marker under announcements/{announcementId}/likes/{userId}.",
+      "type": "object",
+      "properties": {
+        "schoolId": { "type": "string" },
+        "announcementId": { "type": "string" },
+        "userId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["schoolId", "announcementId", "userId", "createdAt"]
+    },
+    "TimetableSlot": {
+      "title": "TimetableSlot",
+      "description": "Weekly timetable entry for a class section.",
+      "type": "object",
+      "properties": {
+        "schoolId": { "type": "string" },
+        "schoolOwnerId": { "type": "string" },
+        "sessionId": { "type": "string" },
+        "sectionId": { "type": "string" },
+        "dayOfWeek": { "type": "string" },
+        "subject": { "type": "string" },
+        "startTime": { "type": "string" },
+        "endTime": { "type": "string" },
+        "teacherName": { "type": "string" },
+        "roomNumber": { "type": "string" },
+        "staffUids": { "type": "array" },
+        "memberUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["schoolId", "schoolOwnerId", "sessionId", "sectionId", "dayOfWeek", "subject", "startTime", "endTime", "teacherName", "roomNumber", "staffUids", "memberUids", "createdAt", "updatedAt"]
+    },
+    "HomeworkItem": {
+      "title": "HomeworkItem",
+      "description": "Homework assignment for a class section.",
+      "type": "object",
+      "properties": {
+        "schoolId": { "type": "string" },
+        "schoolOwnerId": { "type": "string" },
+        "sessionId": { "type": "string" },
+        "sectionId": { "type": "string" },
+        "subject": { "type": "string" },
+        "title": { "type": "string" },
+        "instructions": { "type": "string" },
+        "dueDate": { "type": "string" },
+        "attachmentUrl": { "type": "string" },
+        "teacherId": { "type": "string" },
+        "teacherName": { "type": "string" },
+        "staffUids": { "type": "array" },
+        "memberUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["schoolId", "schoolOwnerId", "sessionId", "sectionId", "subject", "title", "instructions", "dueDate", "teacherName", "staffUids", "memberUids", "createdAt", "updatedAt"]
+    },
+    "AppNotification": {
+      "title": "AppNotification",
+      "description": "User-targeted in-app notification under schools/{schoolId}/notifications/{notificationId}.",
+      "type": "object",
+      "properties": {
+        "schoolId": { "type": "string" },
+        "schoolOwnerId": { "type": "string" },
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "message": { "type": "string" },
+        "category": { "type": "string" },
+        "isRead": { "type": "boolean" },
+        "referenceId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["schoolId", "schoolOwnerId", "userId", "title", "message", "category", "isRead", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": { "schema": { "$ref": "#/entities/UserProfile" }, "description": "User profile document" },
+    "/principal_locks/{userId}": { "schema": { "$ref": "#/entities/PrincipalLock" }, "description": "1-school-per-principal enforcement lock" },
+    "/school_directory/{schoolCode}": { "schema": { "$ref": "#/entities/SchoolDirectoryEntry" }, "description": "Public school directory entry" },
+    "/teacher_invitations/{inviteCode}": { "schema": { "$ref": "#/entities/TeacherInvitation" }, "description": "Teacher invite codes" },
+    "/schools/{schoolId}": { "schema": { "$ref": "#/entities/School" }, "description": "School root profile" },
+    "/schools/{schoolId}/members/{memberUid}": { "schema": { "$ref": "#/entities/SchoolMembership" }, "description": "School RBAC memberships" },
+    "/schools/{schoolId}/teachers/{teacherId}": { "schema": { "$ref": "#/entities/TeacherProfile" }, "description": "School teachers" },
+    "/schools/{schoolId}/teacher_assignments/{assignmentId}": { "schema": { "$ref": "#/entities/TeacherAssignment" }, "description": "Teacher section assignments" },
+    "/schools/{schoolId}/academic_sessions/{sessionId}": { "schema": { "$ref": "#/entities/AcademicSession" }, "description": "Academic sessions" },
+    "/schools/{schoolId}/classes/{classId}": { "schema": { "$ref": "#/entities/SchoolClass" }, "description": "Classes per session" },
+    "/schools/{schoolId}/sections/{sectionId}": { "schema": { "$ref": "#/entities/ClassSection" }, "description": "Class sections" },
+    "/schools/{schoolId}/students/{studentId}": { "schema": { "$ref": "#/entities/StudentRecord" }, "description": "Student records" },
+    "/schools/{schoolId}/student_requests/{requestId}": { "schema": { "$ref": "#/entities/StudentAccountRequest" }, "description": "Student connection requests" },
+    "/schools/{schoolId}/attendance_sessions/{attendanceSessionId}": { "schema": { "$ref": "#/entities/AttendanceSession" }, "description": "Attendance sessions" },
+    "/schools/{schoolId}/attendance_records/{attendanceRecordId}": { "schema": { "$ref": "#/entities/AttendanceRecord" }, "description": "Attendance records" },
+    "/schools/{schoolId}/tests/{testId}": { "schema": { "$ref": "#/entities/TestExam" }, "description": "Tests and exams" },
+    "/schools/{schoolId}/test_results/{resultId}": { "schema": { "$ref": "#/entities/TestResult" }, "description": "Test results" },
+    "/schools/{schoolId}/announcements/{announcementId}": { "schema": { "$ref": "#/entities/AnnouncementPost" }, "description": "Announcements and posts" },
+    "/schools/{schoolId}/announcements/{announcementId}/comments/{commentId}": { "schema": { "$ref": "#/entities/AnnouncementComment" }, "description": "Post comments" },
+    "/schools/{schoolId}/announcements/{announcementId}/likes/{userId}": { "schema": { "$ref": "#/entities/AnnouncementLike" }, "description": "Post likes" },
+    "/schools/{schoolId}/timetables/{slotId}": { "schema": { "$ref": "#/entities/TimetableSlot" }, "description": "Section timetables" },
+    "/schools/{schoolId}/homework/{homeworkId}": { "schema": { "$ref": "#/entities/HomeworkItem" }, "description": "Section homework" },
+    "/schools/{schoolId}/notifications/{notificationId}": { "schema": { "$ref": "#/entities/AppNotification" }, "description": "User notifications" }
+  }
+}

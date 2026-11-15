@@ -1,0 +1,6 @@
+{
+  "name": "BL School Hub",
+  "description": "Complete digital school management platform for Principals, Teachers, and Students powered by Firebase Auth and Cloud Firestore.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
