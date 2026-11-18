@@ -1,6 +1,12 @@
 package com.example.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -37,6 +43,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -46,6 +53,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
@@ -479,26 +487,72 @@ fun AttendanceDonutChart(
 }
 
 @Composable
+fun RotatingHubSpinner(
+    modifier: Modifier = Modifier,
+    size: Dp = 46.dp
+) {
+    val transition = rememberInfiniteTransition(label = "spinner")
+    val outerAngle by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1050, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "outer_angle"
+    )
+    Box(
+        modifier = modifier.size(size),
+        contentAlignment = Alignment.Center
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val outerStroke = Stroke(width = 4.dp.toPx(), cap = StrokeCap.Round)
+            drawArc(
+                color = SkySoft,
+                startAngle = 0f,
+                sweepAngle = 360f,
+                useCenter = false,
+                style = outerStroke
+            )
+            rotate(degrees = outerAngle) {
+                drawArc(
+                    brush = Brush.sweepGradient(listOf(RoyalBlue, SkyAccent, NavyPrimary)),
+                    startAngle = 0f,
+                    sweepAngle = 250f,
+                    useCenter = false,
+                    style = outerStroke
+                )
+            }
+        }
+        CircularProgressIndicator(
+            modifier = Modifier.size(size * 0.56f),
+            strokeWidth = 3.dp,
+            color = RoyalBlue,
+            trackColor = Color.Transparent
+        )
+    }
+}
+
+@Composable
 fun LoadingOverlay(visible: Boolean) {
     if (!visible) return
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.25f)),
+            .background(Color.Black.copy(alpha = 0.22f)),
         contentAlignment = Alignment.Center
     ) {
         Surface(
-            shape = RoundedCornerShape(18.dp),
+            shape = CircleShape,
             color = MaterialTheme.colorScheme.surface,
-            tonalElevation = 6.dp
+            tonalElevation = 8.dp,
+            shadowElevation = 6.dp
         ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 24.dp, vertical = 18.dp),
-                verticalAlignment = Alignment.CenterVertically
+            Box(
+                modifier = Modifier.padding(18.dp),
+                contentAlignment = Alignment.Center
             ) {
-                CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 3.dp)
-                Spacer(Modifier.width(14.dp))
-                Text("Syncing with Firebase...", style = MaterialTheme.typography.bodyMedium)
+                RotatingHubSpinner(size = 48.dp)
             }
         }
     }

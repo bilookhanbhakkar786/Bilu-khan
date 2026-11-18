@@ -2,10 +2,12 @@ package com.example.data.repository
 
 import android.content.Context
 import com.example.R
+import com.example.data.model.PrincipalInvitation
 import com.example.data.model.School
 import com.example.data.model.SchoolMembership
 import com.example.data.model.StudentAccountRequest
 import com.example.data.model.TeacherInvitation
+import com.example.data.model.TeacherJoinRequest
 import com.example.data.model.UserProfile
 import com.example.data.model.UserRole
 import com.example.data.remote.OperationType
@@ -30,7 +32,11 @@ data class ResolvedAccountContext(
     val activeSchool: School?,
     val activeRole: UserRole?,
     val pendingTeacherInvites: List<TeacherInvitation>,
-    val studentRequests: List<StudentAccountRequest>
+    val pendingPrincipalInvites: List<PrincipalInvitation> = emptyList(),
+    val teacherRequests: List<TeacherJoinRequest> = emptyList(),
+    val studentRequests: List<StudentAccountRequest> = emptyList(),
+    val hiddenActiveSchoolBlocked: Boolean = false,
+    val pinnedSchools: List<School> = emptyList()
 )
 
 class AuthRepository(
@@ -68,6 +74,22 @@ class AuthRepository(
             Result.failure(IllegalStateException(friendlyFirestoreMessage(e, "Google Sign-In failed."), e))
         }
     }
+
+    suspend fun reauthenticateWithGoogleIdToken(idToken: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val firebaseUser = auth.currentUser
+                ?: return@withContext Result.failure(IllegalStateException("No signed-in user."))
+            val cred = GoogleAuthProvider.getCredential(idToken, null)
+            firebaseUser.reauthenticate(cred).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Result.failure(IllegalStateException(friendlyFirestoreMessage(e, "Google re-authentication failed."), e))
+        }
+    }
+
+    fun currentLastSignInTimestamp(): Long = auth.currentUser?.metadata?.lastSignInTimestamp ?: 0L
 
     suspend fun ensureCurrentAccountContext(defaultIntent: UserRole = UserRole.PRINCIPAL): Result<ResolvedAccountContext?> =
         withContext(Dispatchers.IO) {
@@ -144,60 +166,194 @@ class AuthRepository(
                 accountIntent = UserRole.PRINCIPAL.dbValue
             )
 
-            // Query schools where user is listed in memberUids
+            // Query schools where user is listed in memberUids (Principal / Teacher)
             val schoolsQuery = db.collection("schools")
                 .whereArrayContains("memberUids", userId)
-            val candidateSchools = try {
+            val candidateSchoolsMap = try {
                 schoolsQuery.get().await().toObjects(
                     School::class.java,
                     DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
-                )
+                ).associateBy { it.id }.toMutableMap()
             } catch (e: Exception) {
                 handleFirestoreError(e, OperationType.LIST, "schools")
-                emptyList()
+                mutableMapOf()
             }
 
-            val memberships = mutableListOf<SchoolMembership>()
-            for (school in candidateSchools) {
-                val memRef = db.collection("schools").document(school.id)
-                    .collection("members").document(userId)
-                try {
-                    val memSnap = memRef.get().await()
-                    val m = memSnap.toObject(
+            // Also query memberships via collectionGroup so instant public-school Student entries are included
+            val groupMemberships = try {
+                db.collectionGroup("members")
+                    .whereEqualTo("userId", userId)
+                    .get()
+                    .await()
+                    .toObjects(
                         SchoolMembership::class.java,
                         DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
                     )
-                    if (m != null && m.status == "active") {
-                        memberships.add(m)
+                    .filter { it.status == "active" }
+            } catch (e: Exception) {
+                handleFirestoreError(e, OperationType.LIST, "collectionGroup/members")
+                emptyList()
+            }
+
+            val mergedMembershipsBySchool = LinkedHashMap<String, SchoolMembership>()
+            groupMemberships.forEach { m ->
+                if (m.schoolId.isNotBlank()) {
+                    mergedMembershipsBySchool[m.schoolId] = m
+                }
+            }
+            for (school in candidateSchoolsMap.values) {
+                if (!mergedMembershipsBySchool.containsKey(school.id)) {
+                    val memRef = db.collection("schools").document(school.id)
+                        .collection("members").document(userId)
+                    try {
+                        val memSnap = memRef.get().await()
+                        val m = memSnap.toObject(
+                            SchoolMembership::class.java,
+                            DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+                        )
+                        if (m != null && m.status == "active") {
+                            mergedMembershipsBySchool[school.id] = m
+                        }
+                    } catch (e: Exception) {
+                        handleFirestoreError(e, OperationType.GET, memRef.path)
                     }
-                } catch (e: Exception) {
-                    handleFirestoreError(e, OperationType.GET, memRef.path)
                 }
             }
 
-            // Priority: Principal > Teacher > Student
-            val primaryMembership = memberships.firstOrNull { it.role == UserRole.PRINCIPAL.dbValue }
-                ?: memberships.firstOrNull { it.role == UserRole.TEACHER.dbValue }
-                ?: memberships.firstOrNull()
+            val memberships = mutableListOf<SchoolMembership>()
+            var hiddenActiveSchoolBlocked = false
+            for (m in mergedMembershipsBySchool.values) {
+                val role = UserRole.fromDb(m.role)
+                val cachedSchool = candidateSchoolsMap[m.schoolId]
+                val resolvedSchool = cachedSchool ?: try {
+                    db.collection("schools").document(m.schoolId).get().await().toObject(
+                        School::class.java,
+                        DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+                    )
+                } catch (e: Exception) {
+                    handleFirestoreError(e, OperationType.GET, "schools/${m.schoolId}")
+                    null
+                }
+                if (resolvedSchool != null) {
+                    candidateSchoolsMap[resolvedSchool.id] = resolvedSchool
+                }
 
-            val activeSchool = primaryMembership?.let { pm ->
-                candidateSchools.firstOrNull { it.id == pm.schoolId }
+                val isHiddenForStudent = role == UserRole.STUDENT &&
+                    (resolvedSchool == null || !resolvedSchool.isPublic)
+                if (isHiddenForStudent) {
+                    if (userProfile.activeSchoolId == m.schoolId) {
+                        hiddenActiveSchoolBlocked = true
+                    }
+                } else if (resolvedSchool != null) {
+                    memberships.add(m)
+                }
             }
 
-            // Query pending teacher invitations only when current token has a verified email
+            val isLockedStudent = userProfile.accountIntent == UserRole.STUDENT.dbValue
+
+            // Load pinned schools (up to 3) keeping user order & filtering out hidden schools
+            val pinnedSchools = mutableListOf<School>()
+            for (pid in userProfile.pinnedSchoolIds.distinct().take(3)) {
+                val candidate = candidateSchoolsMap[pid] ?: try {
+                    db.collection("schools").document(pid).get().await().toObject(
+                        School::class.java,
+                        DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+                    )
+                } catch (e: Exception) {
+                    handleFirestoreError(e, OperationType.GET, "schools/$pid")
+                    null
+                }
+                if (candidate != null && candidate.isPublic) {
+                    candidateSchoolsMap[candidate.id] = candidate
+                    pinnedSchools.add(candidate)
+                }
+            }
+
+            // Priority: Principal > Teacher > Student (locked Students stay Student only)
+            val primaryMembership: SchoolMembership?
+            var effectiveUserProfile = userProfile
+            if (isLockedStudent) {
+                val studentMemberships = memberships.filter { it.role == UserRole.STUDENT.dbValue }
+                val targetSchoolId = when {
+                    pinnedSchools.isNotEmpty() -> {
+                        userProfile.activeSchoolId?.takeIf { activeId ->
+                            pinnedSchools.any { it.id == activeId }
+                        } ?: pinnedSchools.first().id
+                    }
+                    !userProfile.activeSchoolId.isNullOrBlank() -> userProfile.activeSchoolId
+                    else -> null
+                }
+                val targetSchool = targetSchoolId?.let { candidateSchoolsMap[it] }?.takeIf { it.isPublic }
+                var chosenMembership = targetSchool?.let { ts ->
+                    studentMemberships.firstOrNull { it.schoolId == ts.id }
+                }
+                if (targetSchool != null && chosenMembership == null) {
+                    val memRef = db.collection("schools").document(targetSchool.id)
+                        .collection("members").document(userId)
+                    try {
+                        memRef.set(
+                            mapOf(
+                                "schoolId" to targetSchool.id,
+                                "schoolOwnerId" to targetSchool.ownerId,
+                                "userId" to userId,
+                                "role" to "student",
+                                "status" to "active",
+                                "createdAt" to FieldValue.serverTimestamp(),
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
+                        ).await()
+                        chosenMembership = SchoolMembership(
+                            id = userId,
+                            schoolId = targetSchool.id,
+                            schoolOwnerId = targetSchool.ownerId,
+                            userId = userId,
+                            role = UserRole.STUDENT.dbValue,
+                            status = "active"
+                        )
+                        memberships.add(chosenMembership)
+                    } catch (e: Exception) {
+                        handleFirestoreError(e, OperationType.WRITE, memRef.path)
+                    }
+                }
+                if (targetSchool != null && chosenMembership != null && userProfile.activeSchoolId != targetSchool.id) {
+                    try {
+                        userRef.update(
+                            mapOf(
+                                "activeSchoolId" to targetSchool.id,
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
+                        ).await()
+                        effectiveUserProfile = userProfile.copy(activeSchoolId = targetSchool.id)
+                    } catch (_: Exception) {
+                    }
+                }
+                primaryMembership = chosenMembership
+            } else {
+                primaryMembership = memberships.firstOrNull { it.role == UserRole.PRINCIPAL.dbValue }
+                    ?: memberships.firstOrNull { it.role == UserRole.TEACHER.dbValue }
+                    ?: userProfile.activeSchoolId?.takeIf { it.isNotBlank() }?.let { activeId ->
+                        memberships.firstOrNull { it.role == UserRole.STUDENT.dbValue && it.schoolId == activeId }
+                    }
+            }
+
+            val activeSchool = primaryMembership?.let { pm ->
+                candidateSchoolsMap[pm.schoolId]
+            }
+
+            // Query pending teacher & principal invitations only when non-student and current token has a verified email
             val emailVerified = firebaseUser?.isEmailVerified == true
             val verifiedEmail = firebaseUser?.email?.trim()?.lowercase().orEmpty()
-            val invites = if (emailVerified && verifiedEmail.isNotBlank()) {
+            val invites = if (!isLockedStudent && emailVerified && verifiedEmail.isNotBlank()) {
                 try {
                     db.collection("teacher_invitations")
                         .whereEqualTo("emailLower", verifiedEmail)
-                        .whereEqualTo("status", "pending")
                         .get()
                         .await()
                         .toObjects(
                             TeacherInvitation::class.java,
                             DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
                         )
+                        .filter { it.status == "pending" }
                 } catch (e: Exception) {
                     handleFirestoreError(e, OperationType.LIST, "teacher_invitations")
                     emptyList()
@@ -206,29 +362,37 @@ class AuthRepository(
                 emptyList()
             }
 
-            // Query user's student connection requests across schools via CollectionGroup
-            val studentReqs = try {
-                db.collectionGroup("student_requests")
-                    .whereEqualTo("userId", userId)
-                    .get()
-                    .await()
-                    .toObjects(
-                        StudentAccountRequest::class.java,
-                        DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
-                    )
-            } catch (e: Exception) {
-                handleFirestoreError(e, OperationType.LIST, "collectionGroup/student_requests")
+            val principalInvites = if (!isLockedStudent && emailVerified && verifiedEmail.isNotBlank()) {
+                try {
+                    db.collection("principal_invitations")
+                        .whereEqualTo("emailLower", verifiedEmail)
+                        .get()
+                        .await()
+                        .toObjects(
+                            PrincipalInvitation::class.java,
+                            DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+                        )
+                        .filter { it.status == "pending" }
+                } catch (e: Exception) {
+                    handleFirestoreError(e, OperationType.LIST, "principal_invitations")
+                    emptyList()
+                }
+            } else {
                 emptyList()
             }
 
             Result.success(
                 ResolvedAccountContext(
-                    user = userProfile,
+                    user = effectiveUserProfile,
                     memberships = memberships,
                     activeSchool = activeSchool,
-                    activeRole = primaryMembership?.let { UserRole.fromDb(it.role) },
+                    activeRole = if (isLockedStudent && activeSchool != null) UserRole.STUDENT else primaryMembership?.let { UserRole.fromDb(it.role) },
                     pendingTeacherInvites = invites,
-                    studentRequests = studentReqs
+                    pendingPrincipalInvites = principalInvites,
+                    teacherRequests = emptyList(),
+                    studentRequests = emptyList(),
+                    hiddenActiveSchoolBlocked = hiddenActiveSchoolBlocked,
+                    pinnedSchools = pinnedSchools
                 )
             )
         } catch (e: CancellationException) {
@@ -242,6 +406,13 @@ class AuthRepository(
     suspend fun updateAccountIntent(userId: String, role: UserRole): Result<Unit> = withContext(Dispatchers.IO) {
         val userRef = db.collection("users").document(userId)
         try {
+            val snap = userRef.get().await()
+            val existingIntent = snap.getString("accountIntent")
+            if (existingIntent == UserRole.STUDENT.dbValue && role != UserRole.STUDENT) {
+                return@withContext Result.failure(
+                    IllegalStateException("Student accounts stay Student permanently and cannot switch to Teacher or Principal.")
+                )
+            }
             userRef.update(
                 mapOf(
                     "accountIntent" to role.dbValue,

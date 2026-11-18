@@ -17,6 +17,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:label="@string/app_name"
             android:theme="@style/Theme.MyApplication"
             android:windowSoftInputMode="adjustResize">
@@ -24,6 +25,33 @@
                 <action android:name="android.intent.action.MAIN" />
 
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data
+                    android:host="invite"
+                    android:scheme="blschoolhub" />
+                <data
+                    android:host="teacher-invite"
+                    android:scheme="blschoolhub" />
+                <data
+                    android:host="join"
+                    android:scheme="blschoolhub" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data
+                    android:host="blschoolhub.app"
+                    android:pathPrefix="/teacher-invite"
+                    android:scheme="https" />
             </intent-filter>
         </activity>
 

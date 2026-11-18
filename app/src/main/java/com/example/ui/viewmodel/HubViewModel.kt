@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.model.AcademicCalculators
 import com.example.data.model.AcademicSession
 import com.example.data.model.AnnouncementComment
 import com.example.data.model.AnnouncementPost
@@ -11,14 +12,17 @@ import com.example.data.model.AppNotification
 import com.example.data.model.AttendanceRecord
 import com.example.data.model.AttendanceSession
 import com.example.data.model.AttendanceStatus
+import com.example.data.model.ClassFeeDrive
 import com.example.data.model.ClassSection
 import com.example.data.model.HomeworkItem
+import com.example.data.model.PrincipalInvitation
 import com.example.data.model.School
 import com.example.data.model.SchoolClass
 import com.example.data.model.StudentAccountRequest
 import com.example.data.model.StudentRecord
 import com.example.data.model.TeacherAssignment
 import com.example.data.model.TeacherInvitation
+import com.example.data.model.TeacherJoinRequest
 import com.example.data.model.TeacherPermissions
 import com.example.data.model.TeacherProfile
 import com.example.data.model.TestExam
@@ -51,6 +55,8 @@ data class HubUiState(
     val sections: List<ClassSection> = emptyList(),
     val teachers: List<TeacherProfile> = emptyList(),
     val teacherInvitations: List<TeacherInvitation> = emptyList(),
+    val principalInvitations: List<PrincipalInvitation> = emptyList(),
+    val teacherRequests: List<TeacherJoinRequest> = emptyList(),
     val teacherAssignments: List<TeacherAssignment> = emptyList(),
     val students: List<StudentRecord> = emptyList(),
     val studentRequests: List<StudentAccountRequest> = emptyList(),
@@ -62,7 +68,9 @@ data class HubUiState(
     val commentsByAnnouncement: Map<String, List<AnnouncementComment>> = emptyMap(),
     val timetables: List<TimetableSlot> = emptyList(),
     val homework: List<HomeworkItem> = emptyList(),
-    val notifications: List<AppNotification> = emptyList()
+    val classFees: List<ClassFeeDrive> = emptyList(),
+    val notifications: List<AppNotification> = emptyList(),
+    val lastCreatedTeacherInvite: TeacherInvitation? = null
 ) {
     val activeAcademicSession: AcademicSession?
         get() = sessions.find { it.id == selectedSessionId }
@@ -73,7 +81,7 @@ data class HubUiState(
         get() = teachers.find { it.userId == currentUser?.id }
 
     val currentTeacherPermissions: TeacherPermissions
-        get() = if (role == UserRole.PRINCIPAL) {
+        get() = if (role == UserRole.PRINCIPAL || (role == UserRole.TEACHER && currentTeacherProfile?.isActive != false)) {
             TeacherPermissions(
                 viewStudents = true,
                 editStudents = true,
@@ -85,7 +93,7 @@ data class HubUiState(
                 viewReports = true
             )
         } else {
-            currentTeacherProfile?.permissions ?: TeacherPermissions(
+            TeacherPermissions(
                 viewStudents = false,
                 editStudents = false,
                 markAttendance = false,
@@ -115,19 +123,17 @@ data class HubUiState(
     val sessionSections: List<ClassSection>
         get() {
             val sid = activeAcademicSession?.id ?: return emptyList()
-            val allInSession = sections.filter { it.sessionId == sid }
-            if (role == UserRole.TEACHER) {
-                val tp = currentTeacherProfile ?: return emptyList()
-                val assignedIds = teacherAssignments.filter { it.teacherProfileId == tp.id }.map { it.sectionId }.toSet()
-                return allInSession.filter { it.id in assignedIds || it.classTeacherId == tp.id }
-            }
-            return allInSession
+            return sections.filter { it.sessionId == sid }
         }
 
     val sessionStudents: List<StudentRecord>
         get() {
             val sid = activeAcademicSession?.id ?: return emptyList()
-            return students.filter { it.sessionId == sid && it.status == "active" }
+            return AcademicCalculators.sortStudentsByClassAndRoll(
+                students.filter { it.sessionId == sid && it.status == "active" },
+                classes,
+                sections
+            )
         }
 
     val unreadNotificationsCount: Int
@@ -194,6 +200,8 @@ class HubViewModel(
                 sections = bundle.sections,
                 teachers = bundle.teachers,
                 teacherInvitations = bundle.teacherInvitations,
+                principalInvitations = bundle.principalInvitations,
+                teacherRequests = bundle.teacherRequests,
                 teacherAssignments = bundle.teacherAssignments,
                 students = bundle.students,
                 studentRequests = bundle.studentRequests,
@@ -204,8 +212,41 @@ class HubViewModel(
                 announcements = bundle.announcements,
                 timetables = bundle.timetables,
                 homework = bundle.homework,
+                classFees = bundle.classFees,
                 notifications = bundle.notifications
             )
+        }
+    }
+
+    fun clearLastCreatedTeacherInvite() {
+        _uiState.update { it.copy(lastCreatedTeacherInvite = null) }
+    }
+
+    fun toggleSchoolVisibility(makePublic: Boolean) {
+        val schoolId = _uiState.value.school?.id ?: return
+        if (_uiState.value.role != UserRole.PRINCIPAL) {
+            _uiState.update { it.copy(errorMessage = "Only the Principal can hide or unhide the school.") }
+            return
+        }
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, errorMessage = null) }
+            repository.setSchoolVisibility(schoolId, makePublic)
+                .onSuccess { updated ->
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            school = updated,
+                            successMessage = if (makePublic) {
+                                "School is now Visible to all Students."
+                            } else {
+                                "School is now Hidden — only you and your Teachers can see it."
+                            }
+                        )
+                    }
+                }
+                .onFailure { err ->
+                    _uiState.update { it.copy(isLoading = false, errorMessage = err.message) }
+                }
         }
     }
 
@@ -288,6 +329,32 @@ class HubViewModel(
         }
     }
 
+    fun addSectionLectureSlot(sectionId: String, lectureName: String) {
+        val schoolId = _uiState.value.school?.id ?: return
+        val clean = lectureName.trim()
+        if (clean.isBlank()) {
+            _uiState.update { it.copy(errorMessage = "Enter a lecture slot name.") }
+            return
+        }
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true) }
+            repository.addSectionLectureSlot(schoolId, sectionId, clean)
+                .onSuccess { updated ->
+                    _uiState.update { state ->
+                        state.copy(
+                            isLoading = false,
+                            sections = AcademicCalculators.sortSections(
+                                state.sections.map { if (it.id == updated.id) updated else it },
+                                state.classes
+                            ),
+                            successMessage = "Added lecture slot: $clean"
+                        )
+                    }
+                }
+                .onFailure { err -> _uiState.update { it.copy(isLoading = false, errorMessage = err.message) } }
+        }
+    }
+
     fun updateSchoolProfile(
         name: String,
         schoolType: String,
@@ -300,27 +367,68 @@ class HubViewModel(
         website: String?,
         logoUri: Uri?,
         bannerUri: Uri?,
-        galleryUriToAdd: Uri?
+        galleryUriToAdd: Uri?,
+        clearLogo: Boolean = false,
+        clearBanner: Boolean = false
     ) {
         val school = _uiState.value.school ?: return
+        if (name.trim().length < 2 || city.isBlank() || contactNumber.isBlank() || email.isBlank()) {
+            _uiState.update {
+                it.copy(errorMessage = "Please fill School Name (2+ chars), City, Contact Number, and Email.")
+            }
+            return
+        }
         if (establishedYear != null && establishedYear !in 1800..2100) {
             _uiState.update { it.copy(errorMessage = "Established year must be between 1800 and 2100.") }
             return
         }
         viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true) }
-            var logoUrl = school.logoUrl
-            var bannerUrl = school.bannerUrl
+            _uiState.update { it.copy(isLoading = true, errorMessage = null) }
+            var logoUrl = if (clearLogo) null else school.logoUrl
+            var bannerUrl = if (clearBanner) null else school.bannerUrl
             val gallery = school.galleryUrls.toMutableList()
 
             if (logoUri != null) {
-                repository.uploadMedia(logoUri, "logos/${school.id}").onSuccess { logoUrl = it }
+                var uploadFailed = false
+                repository.uploadMedia(logoUri, "logos/${school.id}")
+                    .onSuccess { logoUrl = it }
+                    .onFailure { err ->
+                        uploadFailed = true
+                        _uiState.update {
+                            it.copy(isLoading = false, errorMessage = err.message ?: "Failed to process school logo.")
+                        }
+                    }
+                if (uploadFailed) return@launch
             }
             if (bannerUri != null) {
-                repository.uploadMedia(bannerUri, "banners/${school.id}").onSuccess { bannerUrl = it }
+                var uploadFailed = false
+                repository.uploadMedia(bannerUri, "banners/${school.id}")
+                    .onSuccess { bannerUrl = it }
+                    .onFailure { err ->
+                        uploadFailed = true
+                        _uiState.update {
+                            it.copy(isLoading = false, errorMessage = err.message ?: "Failed to process school banner.")
+                        }
+                    }
+                if (uploadFailed) return@launch
             }
             if (galleryUriToAdd != null) {
-                repository.uploadMedia(galleryUriToAdd, "gallery/${school.id}").onSuccess { gallery.add(it) }
+                if (gallery.size >= 8) {
+                    _uiState.update {
+                        it.copy(isLoading = false, errorMessage = "Maximum 8 campus gallery photos allowed.")
+                    }
+                    return@launch
+                }
+                var uploadFailed = false
+                repository.uploadMedia(galleryUriToAdd, "gallery/${school.id}")
+                    .onSuccess { gallery.add(it) }
+                    .onFailure { err ->
+                        uploadFailed = true
+                        _uiState.update {
+                            it.copy(isLoading = false, errorMessage = err.message ?: "Failed to upload gallery photo.")
+                        }
+                    }
+                if (uploadFailed) return@launch
             }
 
             repository.updateSchool(
@@ -338,9 +446,36 @@ class HubViewModel(
                 bannerUrl = bannerUrl,
                 galleryUrls = gallery
             ).onSuccess { updated ->
-                _uiState.update { it.copy(isLoading = false, school = updated, successMessage = "School profile saved.") }
+                _uiState.update { it.copy(isLoading = false, school = updated, successMessage = "School profile updated.") }
             }.onFailure { err ->
-                _uiState.update { it.copy(isLoading = false, errorMessage = err.message) }
+                _uiState.update { it.copy(isLoading = false, errorMessage = err.message ?: "Failed to update school.") }
+            }
+        }
+    }
+
+    fun removeSchoolGalleryPhoto(photoUrl: String) {
+        val school = _uiState.value.school ?: return
+        val updatedGallery = school.galleryUrls.filterNot { it == photoUrl }
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, errorMessage = null) }
+            repository.updateSchool(
+                schoolId = school.id,
+                name = school.name,
+                schoolType = school.schoolType,
+                address = school.address,
+                city = school.city,
+                contactNumber = school.contactNumber,
+                email = school.email,
+                description = school.description,
+                establishedYear = school.establishedYear,
+                website = school.website,
+                logoUrl = school.logoUrl,
+                bannerUrl = school.bannerUrl,
+                galleryUrls = updatedGallery
+            ).onSuccess { updated ->
+                _uiState.update { it.copy(isLoading = false, school = updated, successMessage = "Gallery photo removed.") }
+            }.onFailure { err ->
+                _uiState.update { it.copy(isLoading = false, errorMessage = err.message ?: "Failed to remove photo.") }
             }
         }
     }
@@ -367,16 +502,6 @@ class HubViewModel(
             _uiState.update { it.copy(errorMessage = "Student Name, Father's Name, and Roll Number are required.") }
             return
         }
-        val duplicate = _uiState.value.students.any {
-            it.id != existingStudent?.id &&
-                it.sessionId == sessionId &&
-                it.sectionId == sectionId &&
-                it.rollNumber.equals(rollNumber.trim(), ignoreCase = true)
-        }
-        if (duplicate) {
-            _uiState.update { it.copy(errorMessage = "Roll Number $rollNumber already exists in this section.") }
-            return
-        }
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true) }
             var avatarUrl = existingStudent?.avatarUrl
@@ -397,11 +522,11 @@ class HubViewModel(
                 parentName = parentName,
                 parentContact = parentContact,
                 address = address,
-                admissionDate = admissionDate.ifBlank { LocalDate.now().toString() },
+                admissionDate = admissionDate.ifBlank { AcademicCalculators.todayDisplayDate() },
                 email = email,
                 avatarUrl = avatarUrl
             ).onSuccess { saved ->
-                _uiState.update { it.copy(successMessage = "Saved student ${saved.fullName} (${saved.studentCode}).") }
+                _uiState.update { it.copy(successMessage = "Saved student ${saved.fullName} (Roll #${saved.rollNumber}).") }
                 refreshWorkspace()
             }.onFailure { err ->
                 _uiState.update { it.copy(isLoading = false, errorMessage = err.message) }
@@ -451,13 +576,52 @@ class HubViewModel(
         }
     }
 
-    fun approveStudentConnection(requestId: String, studentId: String) {
+    fun approveStudentConnection(requestId: String, studentId: String? = null) {
         val schoolId = _uiState.value.school?.id ?: return
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true) }
             repository.approveStudentConnection(schoolId, requestId, studentId)
                 .onSuccess {
-                    _uiState.update { it.copy(successMessage = "Student connection approved and verified!") }
+                    _uiState.update { it.copy(successMessage = "Student join request approved!") }
+                    refreshWorkspace()
+                }
+                .onFailure { err -> _uiState.update { it.copy(isLoading = false, errorMessage = err.message) } }
+        }
+    }
+
+    fun rejectStudentConnection(requestId: String) {
+        val schoolId = _uiState.value.school?.id ?: return
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true) }
+            repository.rejectStudentConnection(schoolId, requestId)
+                .onSuccess {
+                    _uiState.update { it.copy(successMessage = "Student request rejected.") }
+                    refreshWorkspace()
+                }
+                .onFailure { err -> _uiState.update { it.copy(isLoading = false, errorMessage = err.message) } }
+        }
+    }
+
+    fun approveTeacherRequest(requestId: String) {
+        val schoolId = _uiState.value.school?.id ?: return
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true) }
+            repository.approveTeacherRequest(schoolId, requestId)
+                .onSuccess { profile ->
+                    _uiState.update { it.copy(successMessage = "Approved teacher ${profile.fullName}!") }
+                    refreshWorkspace()
+                }
+                .onFailure { err -> _uiState.update { it.copy(isLoading = false, errorMessage = err.message) } }
+        }
+    }
+
+    fun rejectTeacherRequest(requestId: String) {
+        val schoolId = _uiState.value.school?.id ?: return
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true) }
+            repository.rejectTeacherRequest(schoolId, requestId)
+                .onSuccess {
+                    _uiState.update { it.copy(successMessage = "Teacher request rejected.") }
                     refreshWorkspace()
                 }
                 .onFailure { err -> _uiState.update { it.copy(isLoading = false, errorMessage = err.message) } }
@@ -467,15 +631,42 @@ class HubViewModel(
     fun inviteTeacher(fullName: String, email: String, phone: String, permissions: TeacherPermissions) {
         val schoolId = _uiState.value.school?.id ?: return
         val uid = _uiState.value.currentUser?.id ?: return
-        if (fullName.isBlank() || email.isBlank()) {
-            _uiState.update { it.copy(errorMessage = "Teacher name and email are required.") }
-            return
-        }
         viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true) }
+            _uiState.update { it.copy(isLoading = true, errorMessage = null) }
             repository.inviteTeacher(schoolId, uid, fullName, email, phone, permissions)
                 .onSuccess { inv ->
-                    _uiState.update { it.copy(successMessage = "Invitation sent! Code: ${inv.inviteCode}") }
+                    _uiState.update {
+                        it.copy(
+                            lastCreatedTeacherInvite = inv,
+                            successMessage = "Teacher invite link ready! Share it on WhatsApp or any app."
+                        )
+                    }
+                    refreshWorkspace()
+                }
+                .onFailure { err -> _uiState.update { it.copy(isLoading = false, errorMessage = err.message) } }
+        }
+    }
+
+    fun inviteTeacherWithCredentials(
+        fullName: String,
+        email: String,
+        phone: String,
+        username: String,
+        accessPassword: String,
+        permissions: TeacherPermissions
+    ) {
+        val schoolId = _uiState.value.school?.id ?: return
+        val uid = _uiState.value.currentUser?.id ?: return
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, errorMessage = null) }
+            repository.inviteTeacherWithCredentials(schoolId, uid, fullName, email, phone, username, accessPassword, permissions)
+                .onSuccess { inv ->
+                    _uiState.update {
+                        it.copy(
+                            lastCreatedTeacherInvite = inv,
+                            successMessage = "Teacher credentials generated! Username: ${inv.username}, Password: ${inv.accessPassword}."
+                        )
+                    }
                     refreshWorkspace()
                 }
                 .onFailure { err -> _uiState.update { it.copy(isLoading = false, errorMessage = err.message) } }
@@ -545,9 +736,9 @@ class HubViewModel(
                 editorName = user.fullName,
                 linkedUsersByStudentId = linkedUsers
             ).onSuccess {
-                val studentUserIds = _uiState.value.studentRequests
-                    .filter { it.sectionId == section.id && it.status == "approved" }
-                    .map { it.userId }
+                val studentUserIds = _uiState.value.students
+                    .filter { it.sectionId == section.id }
+                    .mapNotNull { it.linkedUserId }
                 repository.dispatchNotifications(
                     schoolId = schoolId,
                     userIds = studentUserIds,
@@ -614,9 +805,9 @@ class HubViewModel(
             _uiState.update { it.copy(isLoading = true) }
             repository.updateTestStatus(schoolId, test.id, "published", uid)
                 .onSuccess {
-                    val studentUserIds = _uiState.value.studentRequests
-                        .filter { it.sectionId == test.sectionId && it.status == "approved" }
-                        .map { it.userId }
+                    val studentUserIds = _uiState.value.students
+                        .filter { it.sectionId == test.sectionId }
+                        .mapNotNull { it.linkedUserId }
                     repository.dispatchNotifications(
                         schoolId = schoolId,
                         userIds = studentUserIds,
@@ -668,11 +859,11 @@ class HubViewModel(
                 publisherName = user.fullName
             ).onSuccess { post ->
                 val targetUserIds = if (scope == "class" && section != null) {
-                    _uiState.value.studentRequests
-                        .filter { it.sectionId == section.id && it.status == "approved" }
-                        .map { it.userId }
+                    _uiState.value.students
+                        .filter { it.sectionId == section.id }
+                        .mapNotNull { it.linkedUserId }
                 } else {
-                    _uiState.value.studentRequests.filter { it.status == "approved" }.map { it.userId } +
+                    _uiState.value.students.mapNotNull { it.linkedUserId } +
                         _uiState.value.teachers.map { it.userId }
                 }
                 repository.dispatchNotifications(
@@ -818,14 +1009,14 @@ class HubViewModel(
                 subject = subject,
                 title = title,
                 instructions = instructions,
-                dueDate = dueDate.ifBlank { LocalDate.now().plusDays(1).toString() },
+                dueDate = dueDate.ifBlank { AcademicCalculators.plusDaysDisplayDate(1) },
                 attachmentUrl = attachmentUrl,
                 teacherId = user.id,
                 teacherName = user.fullName
             ).onSuccess { hw ->
-                val studentUserIds = _uiState.value.studentRequests
-                    .filter { it.sectionId == section.id && it.status == "approved" }
-                    .map { it.userId }
+                val studentUserIds = _uiState.value.students
+                    .filter { it.sectionId == section.id }
+                    .mapNotNull { it.linkedUserId }
                 repository.dispatchNotifications(
                     schoolId = schoolId,
                     userIds = studentUserIds,
@@ -893,5 +1084,214 @@ class HubViewModel(
                 _uiState.update { it.copy(successMessage = "Excel/CSV exported: ${file.name}") }
             }
             .onFailure { err -> _uiState.update { it.copy(errorMessage = err.message ?: "CSV export failed.") } }
+    }
+
+    fun inviteReplacementPrincipal(fullName: String, email: String) {
+        val schoolId = _uiState.value.school?.id ?: return
+        val uid = _uiState.value.currentUser?.id ?: return
+        if (fullName.isBlank() || email.isBlank()) {
+            _uiState.update { it.copy(errorMessage = "Enter the replacement Principal's name and email.") }
+            return
+        }
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true) }
+            repository.inviteReplacementPrincipal(schoolId, uid, fullName, email)
+                .onSuccess { inv ->
+                    _uiState.update { it.copy(successMessage = "Principal handover invite created! Code: ${inv.inviteCode}") }
+                    refreshWorkspace()
+                }
+                .onFailure { err -> _uiState.update { it.copy(isLoading = false, errorMessage = err.message) } }
+        }
+    }
+
+    fun revokePrincipalInvitation(inviteCode: String) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true) }
+            repository.revokePrincipalInvitation(inviteCode)
+                .onSuccess {
+                    _uiState.update { it.copy(successMessage = "Principal invitation removed.") }
+                    refreshWorkspace()
+                }
+                .onFailure { err -> _uiState.update { it.copy(isLoading = false, errorMessage = err.message) } }
+        }
+    }
+
+    fun deletePrincipalAccountAndSchool(onDeleted: () -> Unit) {
+        val schoolId = _uiState.value.school?.id ?: return
+        val ownerId = _uiState.value.school?.ownerId ?: return
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, errorMessage = null) }
+            repository.deletePrincipalAccountAndSchool(schoolId, ownerId)
+                .onSuccess {
+                    _uiState.update { it.copy(isLoading = false) }
+                    onDeleted()
+                }
+                .onFailure { err ->
+                    _uiState.update { it.copy(isLoading = false, errorMessage = err.message ?: "Failed to delete Principal account.") }
+                }
+        }
+    }
+
+    fun removeTeacher(teacher: TeacherProfile) {
+        val schoolId = _uiState.value.school?.id ?: return
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true) }
+            repository.removeTeacherFromSchool(schoolId, teacher)
+                .onSuccess {
+                    _uiState.update { it.copy(successMessage = "Removed teacher ${teacher.fullName} and revoked school access.") }
+                    refreshWorkspace()
+                }
+                .onFailure { err -> _uiState.update { it.copy(isLoading = false, errorMessage = err.message) } }
+        }
+    }
+
+    fun deleteTeacherInvitation(invite: TeacherInvitation) {
+        val schoolId = _uiState.value.school?.id ?: return
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true) }
+            repository.deleteTeacherInvitation(schoolId, invite)
+                .onSuccess {
+                    _uiState.update { it.copy(successMessage = "Removed teacher invitation (${invite.inviteCode}).") }
+                    refreshWorkspace()
+                }
+                .onFailure { err -> _uiState.update { it.copy(isLoading = false, errorMessage = err.message) } }
+        }
+    }
+
+    fun removeApprovedStudent(request: StudentAccountRequest) {
+        val schoolId = _uiState.value.school?.id ?: return
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true) }
+            repository.removeApprovedStudentAccount(schoolId, request)
+                .onSuccess {
+                    _uiState.update { it.copy(successMessage = "Removed ${request.requestedFullName}'s student account access.") }
+                    refreshWorkspace()
+                }
+                .onFailure { err -> _uiState.update { it.copy(isLoading = false, errorMessage = err.message) } }
+        }
+    }
+
+    fun saveClassFeeDrive(
+        existingFeeId: String?,
+        section: ClassSection,
+        title: String,
+        description: String,
+        amountText: String,
+        feeDate: String,
+        initialPaidStudentIds: List<String> = emptyList(),
+        onSaved: (ClassFeeDrive) -> Unit = {}
+    ) {
+        val schoolId = _uiState.value.school?.id ?: return
+        val user = _uiState.value.currentUser ?: return
+        val cleanTitle = title.trim()
+        if (cleanTitle.isBlank()) {
+            _uiState.update { it.copy(errorMessage = "Please write fee detail (e.g. Annual Function, Monthly Fee).") }
+            return
+        }
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, errorMessage = null) }
+            repository.saveClassFeeDrive(
+                existingFeeId = existingFeeId,
+                schoolId = schoolId,
+                sessionId = section.sessionId,
+                classId = section.classId,
+                sectionId = section.id,
+                title = cleanTitle,
+                description = description,
+                amountText = amountText,
+                feeDate = feeDate.ifBlank { AcademicCalculators.todayDisplayDate() },
+                userId = user.id,
+                userName = user.fullName,
+                initialPaidStudentIds = initialPaidStudentIds
+            ).onSuccess { saved ->
+                _uiState.update { state ->
+                    val updatedList = if (state.classFees.any { it.id == saved.id }) {
+                        state.classFees.map { if (it.id == saved.id) saved else it }
+                    } else {
+                        listOf(saved) + state.classFees
+                    }
+                    state.copy(
+                        isLoading = false,
+                        classFees = updatedList,
+                        successMessage = if (existingFeeId == null) {
+                            "Fee '${saved.title}' saved! Now mark students Paid or Unpaid below."
+                        } else {
+                            "Updated fee '${saved.title}'."
+                        }
+                    )
+                }
+                onSaved(saved)
+            }.onFailure { err ->
+                _uiState.update { it.copy(isLoading = false, errorMessage = err.message) }
+            }
+        }
+    }
+
+    fun toggleStudentFeePaidStatus(
+        feeId: String,
+        studentId: String,
+        markPaid: Boolean
+    ) {
+        val schoolId = _uiState.value.school?.id ?: return
+        val user = _uiState.value.currentUser ?: return
+        val previousFees = _uiState.value.classFees
+        val targetFee = previousFees.find { it.id == feeId } ?: return
+
+        // Immediate optimistic update for snappy Paid/Unpaid tapping
+        val optimisticPaid = if (markPaid) {
+            (targetFee.paidStudentIds + studentId).distinct()
+        } else {
+            targetFee.paidStudentIds.filterNot { it == studentId }
+        }
+        _uiState.update { state ->
+            state.copy(
+                classFees = state.classFees.map {
+                    if (it.id == feeId) it.copy(paidStudentIds = optimisticPaid) else it
+                }
+            )
+        }
+
+        viewModelScope.launch {
+            repository.toggleStudentFeePaidStatus(
+                schoolId = schoolId,
+                feeId = feeId,
+                studentId = studentId,
+                markPaid = markPaid,
+                updatedByName = user.fullName
+            ).onSuccess { updated ->
+                _uiState.update { state ->
+                    state.copy(
+                        classFees = state.classFees.map { if (it.id == updated.id) updated else it }
+                    )
+                }
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        classFees = previousFees,
+                        errorMessage = err.message ?: "Could not update fee status."
+                    )
+                }
+            }
+        }
+    }
+
+    fun deleteClassFeeDrive(feeId: String) {
+        val schoolId = _uiState.value.school?.id ?: return
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, errorMessage = null) }
+            repository.deleteClassFeeDrive(schoolId, feeId)
+                .onSuccess {
+                    _uiState.update { state ->
+                        state.copy(
+                            isLoading = false,
+                            classFees = state.classFees.filterNot { it.id == feeId },
+                            successMessage = "Fee record deleted."
+                        )
+                    }
+                }
+                .onFailure { err ->
+                    _uiState.update { it.copy(isLoading = false, errorMessage = err.message) }
+                }
+        }
     }
 }

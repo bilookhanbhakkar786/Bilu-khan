@@ -33,6 +33,7 @@ import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material.icons.rounded.Upgrade
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -69,7 +70,6 @@ import com.example.ui.theme.RoyalBlue
 import com.example.ui.theme.SkySoft
 import com.example.ui.viewmodel.HubUiState
 import com.example.ui.viewmodel.HubViewModel
-import java.time.LocalDate
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -79,24 +79,30 @@ fun StudentsManagementScreen(
     fixedSection: ClassSection? = null
 ) {
     val isPrincipal = state.role == UserRole.PRINCIPAL
+    val isStaff = isPrincipal || state.role == UserRole.TEACHER
     val canEdit = isPrincipal || state.currentTeacherPermissions.editStudents
     var searchQuery by remember { mutableStateOf("") }
     var filterSectionId by remember(fixedSection) { mutableStateOf(fixedSection?.id) }
     var editingStudent by remember { mutableStateOf<StudentRecord?>(null) }
     var showAddDialog by remember { mutableStateOf(false) }
     var detailStudent by remember { mutableStateOf<StudentRecord?>(null) }
+    var deletingStudent by remember { mutableStateOf<StudentRecord?>(null) }
 
-    val filteredStudents = remember(state.sessionStudents, searchQuery, filterSectionId, fixedSection) {
-        state.sessionStudents.filter { s ->
-            val secOk = if (fixedSection != null) s.sectionId == fixedSection.id
-            else filterSectionId == null || s.sectionId == filterSectionId
-            val q = searchQuery.trim()
-            val queryOk = q.isBlank() ||
-                s.fullName.contains(q, ignoreCase = true) ||
-                s.rollNumber.contains(q, ignoreCase = true) ||
-                s.studentCode.contains(q, ignoreCase = true)
-            secOk && queryOk
-        }
+    val filteredStudents = remember(state.sessionStudents, state.classes, state.sections, searchQuery, filterSectionId, fixedSection) {
+        AcademicCalculators.sortStudentsByClassAndRoll(
+            state.sessionStudents.filter { s ->
+                val secOk = if (fixedSection != null) s.sectionId == fixedSection.id
+                else filterSectionId == null || s.sectionId == filterSectionId
+                val q = searchQuery.trim()
+                val queryOk = q.isBlank() ||
+                    s.fullName.contains(q, ignoreCase = true) ||
+                    s.rollNumber.contains(q, ignoreCase = true) ||
+                    s.studentCode.contains(q, ignoreCase = true)
+                secOk && queryOk
+            },
+            state.classes,
+            state.sections
+        )
     }
 
     Column(
@@ -209,7 +215,10 @@ fun StudentsManagementScreen(
                                 }) {
                                     Icon(Icons.Rounded.Edit, contentDescription = "Edit student", tint = RoyalBlue)
                                 }
-                                IconButton(onClick = { viewModel.deleteStudent(stu.id) }) {
+                                IconButton(
+                                    onClick = { deletingStudent = stu },
+                                    modifier = Modifier.testTag("delete_student_${stu.id}")
+                                ) {
                                     Icon(Icons.Rounded.Delete, contentDescription = "Remove student", tint = AbsentRed)
                                 }
                             }
@@ -240,8 +249,31 @@ fun StudentsManagementScreen(
             student = detailStudent!!,
             state = state,
             viewModel = viewModel,
-            canManage = isPrincipal,
+            canManage = isStaff,
             onDismiss = { detailStudent = null }
+        )
+    }
+
+    if (deletingStudent != null) {
+        val stu = deletingStudent!!
+        AlertDialog(
+            onDismissRequest = { deletingStudent = null },
+            title = { Text("Delete Student?") },
+            text = {
+                Text("Delete ${stu.fullName} (Roll #${stu.rollNumber})? This will also disconnect any linked student login account from accessing the school.")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.deleteStudent(stu.id)
+                        deletingStudent = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = AbsentRed)
+                ) {
+                    Text("Delete Student")
+                }
+            },
+            dismissButton = { TextButton(onClick = { deletingStudent = null }) { Text("Cancel") } }
         )
     }
 }
@@ -260,12 +292,17 @@ private fun StudentFormDialog(
     var fullName by remember { mutableStateOf(existing?.fullName.orEmpty()) }
     var fatherName by remember { mutableStateOf(existing?.fatherName.orEmpty()) }
     var rollNumber by remember { mutableStateOf(existing?.rollNumber.orEmpty()) }
-    var dob by remember { mutableStateOf(existing?.dateOfBirth.orEmpty()) }
+    var dob by remember { mutableStateOf(AcademicCalculators.formatDisplayDate(existing?.dateOfBirth)) }
     var gender by remember { mutableStateOf(existing?.gender ?: "Male") }
     var parentName by remember { mutableStateOf(existing?.parentName.orEmpty()) }
     var parentContact by remember { mutableStateOf(existing?.parentContact.orEmpty()) }
     var address by remember { mutableStateOf(existing?.address.orEmpty()) }
-    var admissionDate by remember { mutableStateOf(existing?.admissionDate ?: LocalDate.now().toString()) }
+    var admissionDate by remember {
+        mutableStateOf(
+            AcademicCalculators.formatDisplayDate(existing?.admissionDate)
+                .ifBlank { AcademicCalculators.todayDisplayDate() }
+        )
+    }
     var email by remember { mutableStateOf(existing?.email.orEmpty()) }
     var avatarUri by remember { mutableStateOf<Uri?>(null) }
 
@@ -301,13 +338,18 @@ private fun StudentFormDialog(
                 OutlinedTextField(value = fatherName, onValueChange = { fatherName = it }, label = { Text("Father's Name *") }, modifier = Modifier.fillMaxWidth())
                 Spacer(Modifier.height(6.dp))
                 OutlinedTextField(value = rollNumber, onValueChange = { rollNumber = it }, label = { Text("Roll Number *") }, modifier = Modifier.fillMaxWidth())
+                Text(
+                    text = "Existing colliding roll numbers shift up (+1) automatically (e.g. adding Roll #2 moves 2->3, 3->4).",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = RoyalBlue
+                )
                 Spacer(Modifier.height(6.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf("Male", "Female", "Other").forEach { g ->
                         FilterChip(selected = gender == g, onClick = { gender = g }, label = { Text(g) })
                     }
                 }
-                OutlinedTextField(value = dob, onValueChange = { dob = it }, label = { Text("Date of Birth (YYYY-MM-DD)") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = dob, onValueChange = { dob = it }, label = { Text("Date of Birth (DD-MM-YYYY)") }, modifier = Modifier.fillMaxWidth())
                 Spacer(Modifier.height(6.dp))
                 OutlinedTextField(value = parentName, onValueChange = { parentName = it }, label = { Text("Parent Name") }, modifier = Modifier.fillMaxWidth())
                 Spacer(Modifier.height(6.dp))
@@ -315,7 +357,7 @@ private fun StudentFormDialog(
                 Spacer(Modifier.height(6.dp))
                 OutlinedTextField(value = address, onValueChange = { address = it }, label = { Text("Address") }, modifier = Modifier.fillMaxWidth())
                 Spacer(Modifier.height(6.dp))
-                OutlinedTextField(value = admissionDate, onValueChange = { admissionDate = it }, label = { Text("Admission Date (YYYY-MM-DD)") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = admissionDate, onValueChange = { admissionDate = it }, label = { Text("Admission Date (DD-MM-YYYY)") }, modifier = Modifier.fillMaxWidth())
                 Spacer(Modifier.height(6.dp))
                 OutlinedTextField(value = email, onValueChange = { email = it }, label = { Text("Student Email (Optional)") }, modifier = Modifier.fillMaxWidth())
             }
@@ -358,6 +400,10 @@ private fun StudentProfileDetailDialog(
             Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
                 Text("Student ID: ${student.studentCode}", style = MaterialTheme.typography.labelLarge, color = RoyalBlue)
                 Text("Father: ${student.fatherName} • Parent: ${student.parentContact}", style = MaterialTheme.typography.bodySmall)
+                Text("Admission Date: ${AcademicCalculators.formatDisplayDate(student.admissionDate)}", style = MaterialTheme.typography.bodySmall)
+                if (!student.dateOfBirth.isNullOrBlank()) {
+                    Text("Date of Birth: ${AcademicCalculators.formatDisplayDate(student.dateOfBirth)}", style = MaterialTheme.typography.bodySmall)
+                }
                 Text("Address: ${student.address}", style = MaterialTheme.typography.bodySmall)
                 Spacer(Modifier.height(12.dp))
 
@@ -426,7 +472,10 @@ private fun StudentProfileDetailDialog(
                                 FilterChip(selected = targetSessionId == sess.id, onClick = { targetSessionId = sess.id }, label = { Text(sess.name) })
                             }
                         }
-                        val targetSecs = state.sections.filter { it.sessionId == targetSessionId }
+                        val targetSecs = AcademicCalculators.sortSections(
+                            state.sections.filter { it.sessionId == targetSessionId },
+                            state.classes
+                        )
                         Text("Target Class & Section", style = MaterialTheme.typography.labelMedium)
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             targetSecs.forEach { sec ->

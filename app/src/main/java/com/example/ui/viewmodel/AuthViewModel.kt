@@ -10,11 +10,15 @@ import androidx.credentials.exceptions.GetCredentialCancellationException
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.R
+import com.example.data.model.PrincipalInvitation
 import com.example.data.model.School
 import com.example.data.model.StudentAccountRequest
 import com.example.data.model.TeacherInvitation
+import com.example.data.model.TeacherInviteLinks
+import com.example.data.model.TeacherJoinRequest
 import com.example.data.model.UserProfile
 import com.example.data.model.UserRole
+import com.example.data.repository.AdminRepository
 import com.example.data.repository.AuthRepository
 import com.example.data.repository.ResolvedAccountContext
 import com.example.data.repository.SchoolRepository
@@ -45,20 +49,38 @@ data class AuthUiState(
     val activeSchool: School? = null,
     val activeRole: UserRole? = null,
     val pendingTeacherInvites: List<TeacherInvitation> = emptyList(),
+    val pendingPrincipalInvites: List<PrincipalInvitation> = emptyList(),
+    val teacherRequests: List<TeacherJoinRequest> = emptyList(),
     val studentRequests: List<StudentAccountRequest> = emptyList(),
     val searchedSchools: List<School> = emptyList(),
-    val isSearchingSchools: Boolean = false
+    val pinnedSchools: List<School> = emptyList(),
+    val isBrowsingSchools: Boolean = false,
+    val isSearchingSchools: Boolean = false,
+    val incomingTeacherInviteCode: String? = null,
+    val inviteBlockedPrincipalCode: String? = null,
+    val stagedTeacherCredentials: AuthViewModel.PendingTeacherCredentials? = null
 )
 
 class AuthViewModel(
     private val authRepository: AuthRepository,
     private val schoolRepository: SchoolRepository,
     private val initialRoleIntent: UserRole = UserRole.PRINCIPAL,
-    private val onClearCredentialState: suspend () -> Unit = {}
+    private val onClearCredentialState: suspend () -> Unit = {},
+    private val adminRepository: AdminRepository? = null
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(AuthUiState(selectedRoleIntent = initialRoleIntent))
     val uiState: StateFlow<AuthUiState> = _uiState.asStateFlow()
+    private var hasRecordedSessionVisit = false
+    private var pendingInviteToAutoAccept: String? = null
+    private var pendingCredentialsToAutoAccept: PendingTeacherCredentials? = null
+
+    data class PendingTeacherCredentials(
+        val username: String,
+        val accessPassword: String,
+        val fullName: String = "",
+        val phone: String = ""
+    )
 
     init {
         loadCurrentUserContext()
@@ -68,16 +90,29 @@ class AuthViewModel(
         _uiState.update { it.copy(errorMessage = null, successMessage = null) }
     }
 
+    fun dismissInviteBlockedPrompt() {
+        _uiState.update { it.copy(inviteBlockedPrincipalCode = null, errorMessage = null) }
+    }
+
     fun switchRoleIntent(role: UserRole) {
-        val uid = _uiState.value.user?.id ?: return
-        val nextDest = when (role) {
+        val user = _uiState.value.user ?: return
+        if (user.accountIntent == UserRole.STUDENT.dbValue && role != UserRole.STUDENT) {
+            _uiState.update {
+                it.copy(
+                    errorMessage = "Student accounts stay Student permanently and cannot switch to Teacher or Principal."
+                )
+            }
+            return
+        }
+        val allowedRole = role
+        val nextDest = when (allowedRole) {
             UserRole.PRINCIPAL -> AuthDestination.ONBOARD_PRINCIPAL_CREATE_SCHOOL
             UserRole.TEACHER -> AuthDestination.ONBOARD_TEACHER_INVITE
             UserRole.STUDENT -> AuthDestination.ONBOARD_STUDENT_CONNECT
         }
         _uiState.update {
             it.copy(
-                selectedRoleIntent = role,
+                selectedRoleIntent = allowedRole,
                 destination = nextDest,
                 errorMessage = null,
                 successMessage = null
@@ -87,8 +122,81 @@ class AuthViewModel(
             searchSchools("")
         }
         viewModelScope.launch {
-            authRepository.updateAccountIntent(uid, role)
+            authRepository.updateAccountIntent(user.id, allowedRole)
         }
+    }
+
+    fun handleIncomingTeacherInvite(rawCodeOrUrl: String) {
+        val code = TeacherInviteLinks.extractInviteCode(rawCodeOrUrl) ?: return
+        _uiState.update { it.copy(incomingTeacherInviteCode = code) }
+        val user = _uiState.value.user
+        if (user == null) {
+            pendingInviteToAutoAccept = code
+            return
+        }
+        if (user.accountIntent == UserRole.STUDENT.dbValue || _uiState.value.activeRole == UserRole.STUDENT) {
+            _uiState.update {
+                it.copy(
+                    inviteBlockedPrincipalCode = code,
+                    errorMessage = "Student accounts stay Student permanently and cannot become a Teacher. Sign out and sign in with another Gmail account to accept this Teacher invite."
+                )
+            }
+            return
+        }
+        if (_uiState.value.activeRole == UserRole.PRINCIPAL && _uiState.value.activeSchool != null) {
+            _uiState.update {
+                it.copy(
+                    inviteBlockedPrincipalCode = code,
+                    errorMessage = "You already own ${_uiState.value.activeSchool?.name} as Principal. Sign out and sign in with another Gmail account to join as a Teacher."
+                )
+            }
+            return
+        }
+        pendingInviteToAutoAccept = null
+        acceptTeacherInvitation(code)
+    }
+
+    fun handleIncomingTeacherCredentials(
+        username: String,
+        accessPassword: String,
+        fullName: String = "",
+        phone: String = ""
+    ) {
+        val creds = PendingTeacherCredentials(
+            username = username.trim().removePrefix("@").trim().take(40),
+            accessPassword = accessPassword.trim().take(100),
+            fullName = fullName.trim().take(120),
+            phone = phone.trim().take(40)
+        )
+        _uiState.update { it.copy(stagedTeacherCredentials = creds) }
+        val user = _uiState.value.user
+        if (user == null) {
+            pendingCredentialsToAutoAccept = creds
+            return
+        }
+        if (user.accountIntent == UserRole.STUDENT.dbValue || _uiState.value.activeRole == UserRole.STUDENT) {
+            _uiState.update {
+                it.copy(
+                    errorMessage = "Student accounts stay Student permanently and cannot become a Teacher. Sign out and sign in with another Gmail account to join with Teacher credentials."
+                )
+            }
+            return
+        }
+        if (_uiState.value.activeRole == UserRole.PRINCIPAL && _uiState.value.activeSchool != null) {
+            _uiState.update {
+                it.copy(
+                    errorMessage = "You already own ${_uiState.value.activeSchool?.name} as Principal. Sign out and sign in with another Gmail account to join as a Teacher."
+                )
+            }
+            return
+        }
+        pendingCredentialsToAutoAccept = null
+        acceptTeacherByCredentials(
+            username = creds.username,
+            accessPassword = creds.accessPassword,
+            fullName = creds.fullName,
+            phone = creds.phone
+        )
     }
 
     private fun loadCurrentUserContext() {
@@ -98,6 +206,50 @@ class AuthViewModel(
                 .onSuccess { ctx ->
                     if (ctx != null) {
                         applyResolvedContext(ctx)
+                        val queuedCreds = pendingCredentialsToAutoAccept
+                        val queuedInvite = pendingInviteToAutoAccept
+                        if (queuedCreds != null) {
+                            pendingCredentialsToAutoAccept = null
+                            if (ctx.user.accountIntent == UserRole.STUDENT.dbValue || ctx.activeRole == UserRole.STUDENT) {
+                                _uiState.update {
+                                    it.copy(
+                                        errorMessage = "Student accounts stay Student permanently and cannot become a Teacher. Sign out and sign in with another Gmail account to join with Teacher credentials."
+                                    )
+                                }
+                            } else if (ctx.activeRole != UserRole.PRINCIPAL) {
+                                acceptTeacherByCredentials(
+                                    username = queuedCreds.username,
+                                    accessPassword = queuedCreds.accessPassword,
+                                    fullName = queuedCreds.fullName,
+                                    phone = queuedCreds.phone
+                                )
+                            } else {
+                                _uiState.update {
+                                    it.copy(
+                                        errorMessage = "You already own ${ctx.activeSchool?.name} as Principal. Sign out and sign in with another Gmail account to join as a Teacher."
+                                    )
+                                }
+                            }
+                        } else if (!queuedInvite.isNullOrBlank()) {
+                            pendingInviteToAutoAccept = null
+                            if (ctx.user.accountIntent == UserRole.STUDENT.dbValue || ctx.activeRole == UserRole.STUDENT) {
+                                _uiState.update {
+                                    it.copy(
+                                        inviteBlockedPrincipalCode = queuedInvite,
+                                        errorMessage = "Student accounts stay Student permanently and cannot become a Teacher. Sign out and sign in with another Gmail account to accept this Teacher invite."
+                                    )
+                                }
+                            } else if (ctx.activeRole != UserRole.PRINCIPAL) {
+                                acceptTeacherInvitation(queuedInvite)
+                            } else {
+                                _uiState.update {
+                                    it.copy(
+                                        inviteBlockedPrincipalCode = queuedInvite,
+                                        errorMessage = "You already own ${ctx.activeSchool?.name} as Principal. Sign out and sign in with another Gmail account to join as a Teacher."
+                                    )
+                                }
+                            }
+                        }
                     } else {
                         _uiState.update { it.copy(isLoading = false) }
                     }
@@ -115,23 +267,51 @@ class AuthViewModel(
     }
 
     private fun applyResolvedContext(ctx: ResolvedAccountContext) {
+        val isLockedStudent = ctx.user.accountIntent == UserRole.STUDENT.dbValue
+        val hasInviteOrStagedCreds = !isLockedStudent && (
+            _uiState.value.incomingTeacherInviteCode != null ||
+                ctx.pendingTeacherInvites.isNotEmpty() ||
+                _uiState.value.stagedTeacherCredentials != null ||
+                ctx.user.accountIntent == UserRole.TEACHER.dbValue
+            )
         val nextDest = when {
             ctx.activeSchool != null && ctx.activeRole != null -> AuthDestination.AUTHENTICATED_WORKSPACE
-            ctx.user.accountIntent == UserRole.PRINCIPAL.dbValue -> AuthDestination.ONBOARD_PRINCIPAL_CREATE_SCHOOL
-            ctx.user.accountIntent == UserRole.TEACHER.dbValue -> AuthDestination.ONBOARD_TEACHER_INVITE
+            hasInviteOrStagedCreds -> AuthDestination.ONBOARD_TEACHER_INVITE
+            !isLockedStudent && ctx.user.accountIntent == UserRole.PRINCIPAL.dbValue -> AuthDestination.ONBOARD_PRINCIPAL_CREATE_SCHOOL
             else -> AuthDestination.ONBOARD_STUDENT_CONNECT
+        }
+        val normalizedIntent = when {
+            isLockedStudent -> UserRole.STUDENT
+            nextDest == AuthDestination.ONBOARD_TEACHER_INVITE -> UserRole.TEACHER
+            ctx.user.accountIntent == UserRole.PRINCIPAL.dbValue -> UserRole.PRINCIPAL
+            else -> UserRole.STUDENT
         }
         _uiState.update {
             it.copy(
                 destination = nextDest,
                 isLoading = false,
+                isBrowsingSchools = if (ctx.activeSchool == null) false else it.isBrowsingSchools,
                 user = ctx.user,
                 activeSchool = ctx.activeSchool,
                 activeRole = ctx.activeRole,
-                pendingTeacherInvites = ctx.pendingTeacherInvites,
-                studentRequests = ctx.studentRequests,
-                selectedRoleIntent = UserRole.fromDb(ctx.user.accountIntent)
+                pinnedSchools = ctx.pinnedSchools,
+                pendingTeacherInvites = if (isLockedStudent) emptyList() else ctx.pendingTeacherInvites,
+                pendingPrincipalInvites = if (isLockedStudent) emptyList() else ctx.pendingPrincipalInvites,
+                teacherRequests = emptyList(),
+                studentRequests = emptyList(),
+                selectedRoleIntent = normalizedIntent,
+                errorMessage = if (ctx.hiddenActiveSchoolBlocked && ctx.activeSchool == null) {
+                    "Your previously selected school was hidden by its Principal and is only accessible to its staff."
+                } else {
+                    it.errorMessage
+                }
             )
+        }
+        if (!hasRecordedSessionVisit && adminRepository != null) {
+            hasRecordedSessionVisit = true
+            viewModelScope.launch {
+                adminRepository.recordAppVisit(ctx.user, ctx.activeSchool, ctx.activeRole)
+            }
         }
         if (nextDest == AuthDestination.ONBOARD_STUDENT_CONNECT) {
             searchSchools("")
@@ -159,7 +339,12 @@ class AuthViewModel(
             _uiState.update { it.copy(errorMessage = "Established year must be between 1800 and 2100.") }
             return
         }
-        val uid = _uiState.value.user?.id ?: return
+        val user = _uiState.value.user ?: return
+        if (user.accountIntent == UserRole.STUDENT.dbValue) {
+            _uiState.update { it.copy(errorMessage = "Student accounts stay Student permanently and cannot create a school as Principal.") }
+            return
+        }
+        val uid = user.id
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, errorMessage = null) }
             var logoUrl: String? = null
@@ -211,25 +396,155 @@ class AuthViewModel(
         }
     }
 
-    fun acceptTeacherInvitation(inviteCode: String) {
-        if (inviteCode.isBlank()) {
-            _uiState.update { it.copy(errorMessage = "Enter your teacher invitation code.") }
+    fun stageTeacherCredentials(username: String, accessPassword: String, fullName: String = "", phone: String = "") {
+        val creds = PendingTeacherCredentials(
+            username = username.trim().removePrefix("@").trim().take(40),
+            accessPassword = accessPassword.trim().take(100),
+            fullName = fullName.trim().take(120),
+            phone = phone.trim().take(40)
+        )
+        pendingCredentialsToAutoAccept = creds
+        _uiState.update { it.copy(stagedTeacherCredentials = creds) }
+    }
+
+    fun acceptTeacherInvitation(inviteCode: String, teacherName: String = "", teacherPhone: String = "") {
+        val cleanCode = TeacherInviteLinks.extractInviteCode(inviteCode) ?: inviteCode.trim()
+        if (cleanCode.isBlank()) {
+            _uiState.update { it.copy(errorMessage = "Please open a valid Teacher invite link or paste the invite code.") }
             return
         }
         val user = _uiState.value.user ?: return
+        if (user.accountIntent == UserRole.STUDENT.dbValue) {
+            _uiState.update {
+                it.copy(
+                    inviteBlockedPrincipalCode = cleanCode,
+                    errorMessage = "Student accounts stay Student permanently and cannot become a Teacher. Sign out and sign in with another Gmail account to accept this invite."
+                )
+            }
+            return
+        }
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, errorMessage = null) }
             schoolRepository.acceptTeacherInvitation(
-                inviteCode = inviteCode,
+                inviteCode = cleanCode,
                 userId = user.id,
                 fallbackEmail = user.email,
-                fallbackName = user.fullName
+                fallbackName = teacherName.ifBlank { user.fullName },
+                fallbackPhone = teacherPhone.ifBlank { user.phone }
             ).onSuccess {
+                _uiState.update { it.copy(incomingTeacherInviteCode = null) }
                 authRepository.resolveAccountContext(user.id)
-                    .onSuccess { ctx -> applyResolvedContext(ctx) }
+                    .onSuccess { ctx ->
+                        applyResolvedContext(ctx)
+                        _uiState.update {
+                            it.copy(successMessage = "Welcome! You joined ${ctx.activeSchool?.name ?: "the school"} as Teacher.")
+                        }
+                    }
                     .onFailure { err -> _uiState.update { it.copy(isLoading = false, errorMessage = err.message) } }
             }.onFailure { err ->
-                _uiState.update { it.copy(isLoading = false, errorMessage = err.message ?: "Invalid invite code.") }
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        destination = if (it.activeSchool == null) AuthDestination.ONBOARD_TEACHER_INVITE else it.destination,
+                        errorMessage = err.message ?: "Invalid invite link or code."
+                    )
+                }
+            }
+        }
+    }
+
+    fun acceptTeacherByCredentials(
+        username: String,
+        accessPassword: String,
+        fullName: String = "",
+        phone: String = ""
+    ) {
+        pendingCredentialsToAutoAccept = null
+        val cleanUsername = username.trim().removePrefix("@").trim().take(40)
+        val cleanPassword = accessPassword.trim().take(100)
+        if (cleanUsername.isBlank()) {
+            _uiState.update { it.copy(errorMessage = "Please enter your username.") }
+            return
+        }
+        if (cleanPassword.isBlank()) {
+            _uiState.update { it.copy(errorMessage = "Please enter your password or access code.") }
+            return
+        }
+        val user = _uiState.value.user ?: return
+        if (user.accountIntent == UserRole.STUDENT.dbValue) {
+            _uiState.update {
+                it.copy(
+                    errorMessage = "Student accounts stay Student permanently and cannot become a Teacher. Sign out and sign in with another Gmail account to join as Teacher."
+                )
+            }
+            return
+        }
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, errorMessage = null) }
+            schoolRepository.acceptTeacherByCredentials(
+                username = cleanUsername,
+                accessPassword = cleanPassword,
+                userId = user.id,
+                fallbackEmail = user.email,
+                teacherEnteredName = fullName.ifBlank { user.fullName },
+                teacherEnteredPhone = phone.ifBlank { user.phone }
+            ).onSuccess {
+                _uiState.update {
+                    it.copy(
+                        incomingTeacherInviteCode = null,
+                        stagedTeacherCredentials = null
+                    )
+                }
+                authRepository.resolveAccountContext(user.id)
+                    .onSuccess { ctx ->
+                        applyResolvedContext(ctx)
+                        _uiState.update {
+                            it.copy(successMessage = "Welcome! You joined ${ctx.activeSchool?.name ?: "the school"} as Teacher.")
+                        }
+                    }
+                    .onFailure { err -> _uiState.update { it.copy(isLoading = false, errorMessage = err.message) } }
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        destination = if (it.activeSchool == null) AuthDestination.ONBOARD_TEACHER_INVITE else it.destination,
+                        errorMessage = err.message ?: "Invalid username or password."
+                    )
+                }
+            }
+        }
+    }
+
+    fun acceptPrincipalInvitation(inviteCode: String) {
+        if (inviteCode.isBlank()) {
+            _uiState.update { it.copy(errorMessage = "Enter a Principal transfer invite code.") }
+            return
+        }
+        val user = _uiState.value.user ?: return
+        if (user.accountIntent == UserRole.STUDENT.dbValue) {
+            _uiState.update { it.copy(errorMessage = "Student accounts stay Student permanently and cannot become a Principal.") }
+            return
+        }
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, errorMessage = null) }
+            schoolRepository.acceptPrincipalInvitation(
+                inviteCode = inviteCode,
+                newPrincipalUid = user.id,
+                fallbackEmail = user.email,
+                fallbackName = user.fullName
+            ).onSuccess { school ->
+                authRepository.resolveAccountContext(user.id)
+                    .onSuccess { ctx ->
+                        applyResolvedContext(ctx)
+                        _uiState.update {
+                            it.copy(successMessage = "You are now the Principal of ${school.name}!")
+                        }
+                    }
+                    .onFailure { err ->
+                        _uiState.update { it.copy(isLoading = false, errorMessage = err.message) }
+                    }
+            }.onFailure { err ->
+                _uiState.update { it.copy(isLoading = false, errorMessage = err.message ?: "Could not accept Principal invite.") }
             }
         }
     }
@@ -243,45 +558,102 @@ class AuthViewModel(
         }
     }
 
-    fun requestStudentConnection(
-        school: School,
-        rollNumber: String,
-        fullName: String,
-        fatherName: String,
-        sessionName: String,
-        className: String,
-        sectionName: String
-    ) {
+    fun enterPublicSchoolAsStudent(school: School) {
         val user = _uiState.value.user ?: return
-        if (rollNumber.isBlank() || fullName.isBlank() || fatherName.isBlank()) {
-            _uiState.update { it.copy(errorMessage = "Roll Number, Full Name, and Father's Name are required.") }
-            return
-        }
         viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, errorMessage = null) }
-            schoolRepository.requestStudentConnection(
-                schoolId = school.id,
-                schoolOwnerId = school.ownerId,
-                schoolName = school.name,
-                userId = user.id,
-                rollNumber = rollNumber,
-                fullName = fullName,
-                fatherName = fatherName,
-                sessionName = sessionName,
-                className = className,
-                sectionName = sectionName
-            ).onSuccess { req ->
-                val updated = listOf(req) + _uiState.value.studentRequests.filterNot { it.id == req.id }
-                _uiState.update {
-                    it.copy(
-                        isLoading = false,
-                        studentRequests = updated,
-                        successMessage = "Connection request sent to ${school.name}! Waiting for Principal approval."
-                    )
+            _uiState.update { it.copy(isLoading = true, errorMessage = null, successMessage = null) }
+            schoolRepository.enterSchoolAsStudent(school.id, user.id)
+                .onSuccess { enteredSchool ->
+                    _uiState.update { it.copy(isBrowsingSchools = false) }
+                    authRepository.resolveAccountContext(user.id)
+                        .onSuccess { ctx ->
+                            applyResolvedContext(ctx)
+                            _uiState.update {
+                                it.copy(
+                                    isBrowsingSchools = false,
+                                    successMessage = "Opened ${enteredSchool.name}."
+                                )
+                            }
+                        }
+                        .onFailure { err ->
+                            _uiState.update { it.copy(isLoading = false, errorMessage = err.message) }
+                        }
                 }
-                refreshContext()
-            }.onFailure { err ->
-                _uiState.update { it.copy(isLoading = false, errorMessage = err.message ?: "Request failed.") }
+                .onFailure { err ->
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            errorMessage = err.message ?: "This school could not be opened."
+                        )
+                    }
+                    searchSchools("")
+                }
+        }
+    }
+
+    fun switchSchoolAsStudent() {
+        _uiState.update {
+            it.copy(
+                isBrowsingSchools = true,
+                selectedRoleIntent = UserRole.STUDENT,
+                errorMessage = null,
+                successMessage = null
+            )
+        }
+        searchSchools("")
+    }
+
+    fun returnToActiveStudentSchool() {
+        _uiState.update {
+            it.copy(
+                isBrowsingSchools = false,
+                errorMessage = null,
+                successMessage = null
+            )
+        }
+    }
+
+    fun togglePinSchool(school: School) {
+        val user = _uiState.value.user ?: return
+        val currentlyPinned = _uiState.value.pinnedSchools.any { it.id == school.id } ||
+            user.pinnedSchoolIds.contains(school.id)
+        viewModelScope.launch {
+            _uiState.update { it.copy(errorMessage = null, successMessage = null) }
+            if (currentlyPinned) {
+                schoolRepository.unpinSchoolForStudent(user.id, school.id)
+                    .onSuccess { newIds ->
+                        _uiState.update { state ->
+                            val newPinned = state.pinnedSchools.filterNot { it.id == school.id }
+                            state.copy(
+                                user = state.user?.copy(pinnedSchoolIds = newIds),
+                                pinnedSchools = newPinned,
+                                successMessage = "Unpinned ${school.name}."
+                            )
+                        }
+                    }
+                    .onFailure { err ->
+                        _uiState.update { it.copy(errorMessage = err.message ?: "Could not unpin school.") }
+                    }
+            } else {
+                schoolRepository.pinSchoolForStudent(user.id, school.id)
+                    .onSuccess { newIds ->
+                        _uiState.update { state ->
+                            val lookup = (state.pinnedSchools + state.searchedSchools + listOfNotNull(state.activeSchool))
+                                .associateBy { it.id }
+                            val newPinned = newIds.mapNotNull { id -> lookup[id] }
+                            state.copy(
+                                user = state.user?.copy(
+                                    pinnedSchoolIds = newIds,
+                                    activeSchoolId = state.user.activeSchoolId ?: school.id
+                                ),
+                                pinnedSchools = newPinned,
+                                successMessage = "Pinned ${school.name} (${newIds.size}/3)."
+                            )
+                        }
+                    }
+                    .onFailure { err ->
+                        _uiState.update { it.copy(errorMessage = err.message ?: "You can pin up to 3 schools only.") }
+                    }
             }
         }
     }
@@ -329,7 +701,85 @@ class AuthViewModel(
         }
     }
 
+    fun deleteMyNonPrincipalAccount(activityContext: Context?, onComplete: () -> Unit = {}) {
+        val user = _uiState.value.user ?: return
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, errorMessage = null) }
+            if (activityContext != null) {
+                val lastSignIn = authRepository.currentLastSignInTimestamp()
+                if (System.currentTimeMillis() - lastSignIn > 4 * 60 * 1000L) {
+                    val reauth = reauthenticateInteractiveWithGoogle(activityContext, authRepository)
+                    if (reauth.isFailure) {
+                        _uiState.update {
+                            it.copy(
+                                isLoading = false,
+                                errorMessage = reauth.exceptionOrNull()?.message ?: "Please confirm Google Sign-In to delete your account."
+                            )
+                        }
+                        return@launch
+                    }
+                }
+            }
+            schoolRepository.deleteNonPrincipalAccountAndData(user.id)
+                .onSuccess {
+                    authRepository.logout(onClearCredentialState)
+                    onComplete()
+                }
+                .onFailure { err ->
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            errorMessage = err.message ?: "Could not delete your account."
+                        )
+                    }
+                }
+        }
+    }
+
+    fun ensureFreshAuthThenRun(activityContext: Context?, action: (() -> Unit) -> Unit) {
+        viewModelScope.launch {
+            if (activityContext != null) {
+                val lastSignIn = authRepository.currentLastSignInTimestamp()
+                if (System.currentTimeMillis() - lastSignIn > 4 * 60 * 1000L) {
+                    val reauth = reauthenticateInteractiveWithGoogle(activityContext, authRepository)
+                    if (reauth.isFailure) {
+                        _uiState.update {
+                            it.copy(errorMessage = reauth.exceptionOrNull()?.message ?: "Please confirm Google Sign-In to continue.")
+                        }
+                        return@launch
+                    }
+                }
+            }
+            action { logout() }
+        }
+    }
+
     companion object {
+        suspend fun reauthenticateInteractiveWithGoogle(
+            activityContext: Context,
+            authRepository: AuthRepository
+        ): Result<Unit> {
+            return try {
+                val credentialManager = CredentialManager.create(activityContext)
+                val option = GetSignInWithGoogleOption.Builder(
+                    activityContext.getString(R.string.default_web_client_id)
+                ).build()
+                val request = GetCredentialRequest.Builder().addCredentialOption(option).build()
+                val result = credentialManager.getCredential(activityContext, request)
+                val cred = result.credential
+                if (cred is CustomCredential && cred.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
+                    val googleCred = GoogleIdTokenCredential.createFrom(cred.data)
+                    authRepository.reauthenticateWithGoogleIdToken(googleCred.idToken)
+                } else {
+                    Result.failure(IllegalStateException("Unsupported Google credential type."))
+                }
+            } catch (_: GetCredentialCancellationException) {
+                Result.failure(IllegalStateException("Verification cancelled."))
+            } catch (e: Exception) {
+                Result.failure(IllegalStateException(e.localizedMessage ?: "Re-authentication failed.", e))
+            }
+        }
+
         suspend fun signInInteractiveWithGoogle(
             activityContext: Context,
             preferredRole: UserRole,

@@ -32,6 +32,7 @@ abstract class FirestoreEmulatorTestBase {
 
     @Before
     open fun setUpFirebase() {
+        org.junit.Assume.assumeTrue("Firestore + Auth emulators are not running", isEmulatorListening())
         val context = ApplicationProvider.getApplicationContext<Context>()
         val resId = context.resources.getIdentifier("firestore_database_id", "string", context.packageName)
         databaseId = if (resId != 0) context.getString(resId) else "demo-database"
@@ -64,19 +65,43 @@ abstract class FirestoreEmulatorTestBase {
 
     @After
     open fun tearDownFirebase() {
-        auth.signOut()
+        if (::auth.isInitialized) {
+            auth.signOut()
+        }
     }
 
     // Local unit test helper ONLY (under app/src/test/). In application code (app/src/main/),
     // user login MUST use Google Sign-In with Credential Manager.
-    protected suspend fun signInTestUser(email: String): String = withContext(Dispatchers.IO) {
+    protected suspend fun signInTestUser(email: String, markEmailVerified: Boolean = false): String = withContext(Dispatchers.IO) {
         withTimeout(AUTH_TIMEOUT_MS) {
             val result = try {
                 auth.signInWithEmailAndPassword(email, DEFAULT_PASSWORD).await()
             } catch (_: FirebaseAuthInvalidUserException) {
                 auth.createUserWithEmailAndPassword(email, DEFAULT_PASSWORD).await()
             }
-            checkNotNull(result.user?.uid) { "User auth failed" }
+            val user = checkNotNull(result.user) { "User auth failed" }
+            if (markEmailVerified && !user.isEmailVerified) {
+                val url = java.net.URL(
+                    "http://$EMULATOR_HOST:$AUTH_PORT/identitytoolkit.googleapis.com/v1/projects/$PROJECT_ID/accounts:update"
+                )
+                val conn = (url.openConnection() as java.net.HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json")
+                    setRequestProperty("Authorization", "Bearer owner")
+                }
+                val body = """{"localId":"${user.uid}","emailVerified":true}"""
+                conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+                val code = conn.responseCode
+                check(code in 200..299) { "Auth emulator email verification failed with HTTP $code" }
+                auth.signOut()
+                val refreshed = auth.signInWithEmailAndPassword(email, DEFAULT_PASSWORD).await()
+                val refreshedUser = checkNotNull(refreshed.user) { "Re-sign-in after verification failed" }
+                refreshedUser.getIdToken(true).await()
+                check(refreshedUser.isEmailVerified) { "Expected emailVerified=true after emulator update" }
+                return@withTimeout refreshedUser.uid
+            }
+            user.uid
         }
     }
 
@@ -89,6 +114,22 @@ abstract class FirestoreEmulatorTestBase {
         return null
     }
 
+    private fun isPortOpen(port: Int): Boolean = try {
+        java.net.Socket().use { socket ->
+            socket.connect(java.net.InetSocketAddress(EMULATOR_HOST, port), 1500)
+            true
+        }
+    } catch (_: Exception) {
+        false
+    }
+
+    private fun isEmulatorListening(): Boolean {
+        repeat(2) {
+            if (isPortOpen(FIRESTORE_PORT) && isPortOpen(AUTH_PORT)) return true
+        }
+        return false
+    }
+
     private companion object {
         const val EMULATOR_HOST = "127.0.0.1"
         const val FIRESTORE_PORT = 8085
@@ -98,3 +139,4 @@ abstract class FirestoreEmulatorTestBase {
         const val AUTH_TIMEOUT_MS = 5000L
     }
 }
+

@@ -79,8 +79,6 @@ secrets {
   propertiesFileName = ".env"
   defaultPropertiesFileName = ".env.example"
   ignoreList.add("FIREBASE_APPCHECK_DEBUG_TOKEN")
-  ignoreList.add("SUPABASE_URL")
-  ignoreList.add("SUPABASE_ANON_KEY")
   ignoreList.add("GOOGLE_WEB_CLIENT_ID")
 }
 

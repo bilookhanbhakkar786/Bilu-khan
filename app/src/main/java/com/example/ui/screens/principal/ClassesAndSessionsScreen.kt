@@ -28,6 +28,7 @@ import androidx.compose.material.icons.rounded.Campaign
 import androidx.compose.material.icons.rounded.Class
 import androidx.compose.material.icons.rounded.EventAvailable
 import androidx.compose.material.icons.rounded.Groups
+import androidx.compose.material.icons.rounded.Payments
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.AlertDialog
@@ -66,6 +67,7 @@ import com.example.ui.components.SectionCard
 import com.example.ui.components.ShortcutTile
 import com.example.ui.components.StatusPill
 import com.example.ui.screens.shared.AttendanceWorkspacePanel
+import com.example.ui.screens.shared.ClassFeesPanel
 import com.example.ui.screens.shared.TestsAndResultsPanel
 import com.example.ui.screens.shared.TimetableAndHomeworkPanel
 import com.example.ui.theme.NavyPrimary
@@ -83,6 +85,7 @@ fun ClassesAndSessionsScreen(
     viewModel: HubViewModel
 ) {
     val isPrincipal = state.role == UserRole.PRINCIPAL
+    val canManageClasses = isPrincipal || state.role == UserRole.TEACHER
     var selectedSection by remember { mutableStateOf<ClassSection?>(null) }
     var showCreateSessionDialog by remember { mutableStateOf(false) }
     var showCreateClassDialog by remember { mutableStateOf(false) }
@@ -113,7 +116,7 @@ fun ClassesAndSessionsScreen(
             SectionCard(
                 title = "Academic Sessions",
                 trailing = {
-                    if (isPrincipal) {
+                    if (canManageClasses) {
                         TextButton(
                             onClick = { showCreateSessionDialog = true },
                             modifier = Modifier.testTag("new_session_button")
@@ -149,7 +152,7 @@ fun ClassesAndSessionsScreen(
                             )
                         }
                     }
-                    if (isPrincipal && state.activeAcademicSession != null && !state.activeAcademicSession!!.isCurrent) {
+                    if (canManageClasses && state.activeAcademicSession != null && !state.activeAcademicSession!!.isCurrent) {
                         Spacer(Modifier.height(8.dp))
                         OutlinedButton(
                             onClick = { viewModel.setCurrentAcademicSession(state.activeAcademicSession!!.id) }
@@ -166,7 +169,7 @@ fun ClassesAndSessionsScreen(
             SectionCard(
                 title = "Classes (${state.activeAcademicSession?.name ?: "No Session"})",
                 trailing = {
-                    if (isPrincipal && state.activeAcademicSession != null) {
+                    if (canManageClasses && state.activeAcademicSession != null) {
                         Button(
                             onClick = { showCreateClassDialog = true },
                             modifier = Modifier.testTag("create_class_button")
@@ -194,7 +197,7 @@ fun ClassesAndSessionsScreen(
                     val sectionsByClass = state.sessionSections.groupBy { it.classId }
                     state.sessionClasses.forEach { cls ->
                         val clsSections = sectionsByClass[cls.id].orEmpty()
-                        if (clsSections.isNotEmpty() || isPrincipal) {
+                        if (clsSections.isNotEmpty() || canManageClasses) {
                             Text(
                                 text = cls.name,
                                 style = MaterialTheme.typography.titleMedium,
@@ -245,8 +248,8 @@ fun ClassesAndSessionsScreen(
 
     if (showCreateSessionDialog) {
         var name by remember { mutableStateOf("2026-2027") }
-        var startDate by remember { mutableStateOf("2026-04-01") }
-        var endDate by remember { mutableStateOf("2027-03-31") }
+        var startDate by remember { mutableStateOf("01-04-2026") }
+        var endDate by remember { mutableStateOf("31-03-2027") }
         var makeCurrent by remember { mutableStateOf(true) }
 
         AlertDialog(
@@ -256,9 +259,9 @@ fun ClassesAndSessionsScreen(
                 Column {
                     OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Session Name (e.g. 2026-2027) *") }, modifier = Modifier.fillMaxWidth())
                     Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(value = startDate, onValueChange = { startDate = it }, label = { Text("Start Date (YYYY-MM-DD)") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = startDate, onValueChange = { startDate = it }, label = { Text("Start Date (DD-MM-YYYY)") }, modifier = Modifier.fillMaxWidth())
                     Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(value = endDate, onValueChange = { endDate = it }, label = { Text("End Date (YYYY-MM-DD)") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = endDate, onValueChange = { endDate = it }, label = { Text("End Date (DD-MM-YYYY)") }, modifier = Modifier.fillMaxWidth())
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(checked = makeCurrent, onCheckedChange = { makeCurrent = it })
                         Text("Set as Current Session", style = MaterialTheme.typography.bodySmall)
@@ -344,15 +347,21 @@ fun ClassDashboardScreen(
 ) {
     val context = LocalContext.current
     val isPrincipal = state.role == UserRole.PRINCIPAL
+    val isStaff = isPrincipal || state.role == UserRole.TEACHER
     var activeTab by remember { mutableIntStateOf(0) }
     val sessionName = state.sessions.find { it.id == section.sessionId }?.name.orEmpty()
     val classTeacherName = state.teachers.find { it.id == section.classTeacherId }?.fullName ?: "Not Assigned"
     val sectionStudents = remember(state.students, section.id) {
-        state.students.filter { it.sectionId == section.id && it.status == "active" }
+        AcademicCalculators.sortStudentsByRoll(
+            state.students.filter { it.sectionId == section.id && it.status == "active" }
+        )
+    }
+    val sectionFeesCount = remember(state.classFees, section.id) {
+        state.classFees.count { it.sectionId == section.id }
     }
     var showClassPostDialog by remember { mutableStateOf(false) }
 
-    val tabs = listOf("Overview", "Students", "Attendance", "Tests & Results", "Announcements", "Timetable & HW", "Class Reports", "Settings")
+    val tabs = listOf("Overview", "Students", "Attendance", "Fees", "Tests & Results", "Announcements", "Timetable & HW", "Class Reports", "Settings")
 
     Column(
         modifier = Modifier
@@ -401,18 +410,20 @@ fun ClassDashboardScreen(
                         ) {
                             ShortcutTile("Students", Icons.Rounded.Groups, sectionStudents.size, "class_opt_students", { activeTab = 1 }, Modifier.weight(1f))
                             ShortcutTile("Attendance", Icons.Rounded.EventAvailable, 0, "class_opt_attendance", { activeTab = 2 }, Modifier.weight(1f))
-                            ShortcutTile("Tests & Results", Icons.Rounded.Assignment, 0, "class_opt_tests", { activeTab = 3 }, Modifier.weight(1f))
-                            ShortcutTile("Announcements", Icons.Rounded.Campaign, 0, "class_opt_announcements", { activeTab = 4 }, Modifier.weight(1f))
-                            ShortcutTile("Timetable", Icons.Rounded.Schedule, 0, "class_opt_timetable", { activeTab = 5 }, Modifier.weight(1f))
-                            ShortcutTile("Class Reports", Icons.Rounded.Assessment, 0, "class_opt_reports", { activeTab = 6 }, Modifier.weight(1f))
-                            ShortcutTile("Class Settings", Icons.Rounded.Settings, 0, "class_opt_settings", { activeTab = 7 }, Modifier.weight(1f))
+                            ShortcutTile("Fees", Icons.Rounded.Payments, sectionFeesCount, "class_opt_fees", { activeTab = 3 }, Modifier.weight(1f))
+                            ShortcutTile("Tests & Results", Icons.Rounded.Assignment, 0, "class_opt_tests", { activeTab = 4 }, Modifier.weight(1f))
+                            ShortcutTile("Announcements", Icons.Rounded.Campaign, 0, "class_opt_announcements", { activeTab = 5 }, Modifier.weight(1f))
+                            ShortcutTile("Timetable", Icons.Rounded.Schedule, 0, "class_opt_timetable", { activeTab = 6 }, Modifier.weight(1f))
+                            ShortcutTile("Class Reports", Icons.Rounded.Assessment, 0, "class_opt_reports", { activeTab = 7 }, Modifier.weight(1f))
+                            ShortcutTile("Class Settings", Icons.Rounded.Settings, 0, "class_opt_settings", { activeTab = 8 }, Modifier.weight(1f))
                         }
                     }
                 }
                 1 -> StudentsManagementScreen(state = state, viewModel = viewModel, fixedSection = section)
                 2 -> AttendanceWorkspacePanel(state = state, viewModel = viewModel, fixedSection = section)
-                3 -> TestsAndResultsPanel(state = state, viewModel = viewModel, fixedSection = section)
-                4 -> {
+                3 -> ClassFeesPanel(state = state, viewModel = viewModel, schoolClass = schoolClass, section = section)
+                4 -> TestsAndResultsPanel(state = state, viewModel = viewModel, fixedSection = section)
+                5 -> {
                     Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
                         if (isPrincipal || state.currentTeacherPermissions.publishAnnouncements) {
                             Button(onClick = { showClassPostDialog = true }, modifier = Modifier.fillMaxWidth()) {
@@ -439,8 +450,8 @@ fun ClassDashboardScreen(
                         }
                     }
                 }
-                5 -> TimetableAndHomeworkPanel(state = state, viewModel = viewModel, fixedSection = section)
-                6 -> {
+                6 -> TimetableAndHomeworkPanel(state = state, viewModel = viewModel, fixedSection = section)
+                7 -> {
                     Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
                         val sectionSessions = state.attendanceSessions.filter { it.sectionId == section.id }
                         SectionCard(title = "Class Reports (${schoolClass?.name} - ${section.name})") {
@@ -475,7 +486,7 @@ fun ClassDashboardScreen(
                         }
                     }
                 }
-                7 -> {
+                8 -> {
                     Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
                         var secName by remember(section.id) { mutableStateOf(section.name) }
                         var secDesc by remember(section.id) { mutableStateOf(section.description) }
@@ -485,7 +496,7 @@ fun ClassDashboardScreen(
                             OutlinedTextField(value = secName, onValueChange = { secName = it }, label = { Text("Section Name") }, modifier = Modifier.fillMaxWidth())
                             Spacer(Modifier.height(8.dp))
                             OutlinedTextField(value = secDesc, onValueChange = { secDesc = it }, label = { Text("Description") }, modifier = Modifier.fillMaxWidth())
-                            if (isPrincipal && state.teachers.isNotEmpty()) {
+                            if (isStaff && state.teachers.isNotEmpty()) {
                                 Spacer(Modifier.height(8.dp))
                                 Text("Class Teacher", style = MaterialTheme.typography.labelMedium)
                                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -499,7 +510,7 @@ fun ClassDashboardScreen(
                                 }
                             }
                             Spacer(Modifier.height(12.dp))
-                            if (isPrincipal) {
+                            if (isStaff) {
                                 Button(onClick = { viewModel.updateSectionSettings(section.id, secName, secDesc, teacherId) }) {
                                     Text("Save Class Settings")
                                 }
@@ -514,7 +525,7 @@ fun ClassDashboardScreen(
     if (showClassPostDialog) {
         CreateAnnouncementDialog(
             sections = listOf(section),
-            isPrincipal = false,
+            canChooseScope = isStaff,
             defaultSection = section,
             onDismiss = { showClassPostDialog = false },
             onPublish = { scope, sec, cat, title, body, uri, allowComments ->

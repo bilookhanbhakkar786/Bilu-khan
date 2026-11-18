@@ -20,8 +20,15 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function isSuperAdmin() {
+      return isSignedIn() &&
+             ('email' in request.auth.token) &&
+             request.auth.token.email_verified == true &&
+             request.auth.token.email.lower() == 'bilookhanbhakkar@gmail.com';
+    }
+
     function isValidId(id) {
-      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-\\.]+$');
     }
 
     function isStr(val, minLen, maxLen) {
@@ -34,6 +41,18 @@ service cloud.firestore {
 
     function isUidList(arr, maxLen) {
       return arr is list && arr.size() <= maxLen && (arr.size() == 0 || (arr[0] is string && arr[0].size() <= 128));
+    }
+
+    function isOptUidList(data, key, maxLen) {
+      return !(key in data) || isUidList(data[key], maxLen);
+    }
+
+    function isOptStrList(data, key, maxLen, maxItemLen) {
+      return !(key in data) || (
+        data[key] is list &&
+        data[key].size() <= maxLen &&
+        (data[key].size() == 0 || (data[key][0] is string && data[key][0].size() <= maxItemLen))
+      );
     }
 
     function isTimestampsCreate(data) {
@@ -60,10 +79,17 @@ service cloud.firestore {
              schoolDoc(schoolId).data.ownerId == request.auth.uid;
     }
 
+    function isSchoolVisibleToStudent(schoolId) {
+      return exists(/databases/$(database)/documents/schools/$(schoolId)) &&
+             (!('isPublic' in schoolDoc(schoolId).data) || schoolDoc(schoolId).data.isPublic == true);
+    }
+
     function isSchoolMember(schoolId) {
       return isSignedIn() &&
              exists(/databases/$(database)/documents/schools/$(schoolId)/members/$(request.auth.uid)) &&
-             memberDoc(schoolId, request.auth.uid).data.status == 'active';
+             memberDoc(schoolId, request.auth.uid).data.status == 'active' &&
+             (memberDoc(schoolId, request.auth.uid).data.role in ['principal', 'teacher'] ||
+              isSchoolVisibleToStudent(schoolId));
     }
 
     function isSchoolTeacher(schoolId) {
@@ -75,13 +101,6 @@ service cloud.firestore {
 
     function isSchoolStaff(schoolId) {
       return isSchoolPrincipal(schoolId) || isSchoolTeacher(schoolId);
-    }
-
-    function hasTeacherPermission(schoolId, permKey) {
-      return isSchoolTeacher(schoolId) &&
-             exists(/databases/$(database)/documents/schools/$(schoolId)/teachers/$(request.auth.uid)) &&
-             get(/databases/$(database)/documents/schools/$(schoolId)/teachers/$(request.auth.uid)).data.isActive == true &&
-             get(/databases/$(database)/documents/schools/$(schoolId)/teachers/$(request.auth.uid)).data.permissions[permKey] == true;
     }
 
     function isValidPermissionsMap(p) {
@@ -100,6 +119,21 @@ service cloud.firestore {
              p.publishAnnouncements is bool && p.viewReports is bool;
     }
 
+    function isStudentAccountLocked(uid) {
+      return exists(/databases/$(database)/documents/users/$(uid)) &&
+             get(/databases/$(database)/documents/users/$(uid)).data.accountIntent == 'student';
+    }
+
+    function isPinnedSchoolList(data) {
+      return !('pinnedSchoolIds' in data) || (
+        data.pinnedSchoolIds is list &&
+        data.pinnedSchoolIds.size() <= 3 &&
+        (data.pinnedSchoolIds.size() < 1 || (data.pinnedSchoolIds[0] is string && data.pinnedSchoolIds[0].size() >= 1 && data.pinnedSchoolIds[0].size() <= 128)) &&
+        (data.pinnedSchoolIds.size() < 2 || (data.pinnedSchoolIds[1] is string && data.pinnedSchoolIds[1].size() >= 1 && data.pinnedSchoolIds[1].size() <= 128)) &&
+        (data.pinnedSchoolIds.size() < 3 || (data.pinnedSchoolIds[2] is string && data.pinnedSchoolIds[2].size() >= 1 && data.pinnedSchoolIds[2].size() <= 128))
+      );
+    }
+
     // --- ENTITY VALIDATION HELPERS ---
     function isValidUserProfile(data) {
       return isStr(data.userId, 1, 128) &&
@@ -108,7 +142,8 @@ service cloud.firestore {
              isStr(data.phone, 0, 40) &&
              isOptStr(data, 'avatarUrl', 400000) &&
              data.accountIntent in ['principal', 'teacher', 'student'] &&
-             isOptStr(data, 'activeSchoolId', 128);
+             isOptStr(data, 'activeSchoolId', 128) &&
+             isPinnedSchoolList(data);
     }
 
     function isValidPrincipalLock(data) {
@@ -124,7 +159,7 @@ service cloud.firestore {
              isStr(data.name, 2, 160) &&
              data.schoolType in ['Private', 'Government', 'Other'] &&
              isStr(data.city, 1, 100) &&
-             data.isPublic == true;
+             data.isPublic is bool;
     }
 
     function isValidSchool(data) {
@@ -146,9 +181,25 @@ service cloud.firestore {
              isStr(data.timezone, 1, 64) &&
              isUidList(data.memberUids, 500) &&
              isUidList(data.staffUids, 100) &&
+             (!('isPublic' in data) || data.isPublic is bool) &&
+             isOptStr(data, 'lastAcceptedPrincipalInviteCode', 64) &&
              (!('sessionIds' in data) || isUidList(data.sessionIds, 100)) &&
              (!('classIds' in data) || isUidList(data.classIds, 200)) &&
              (!('sectionIds' in data) || isUidList(data.sectionIds, 300));
+    }
+
+    function isValidPrincipalInvitation(data) {
+      return isStr(data.schoolId, 1, 128) &&
+             isStr(data.schoolName, 1, 160) &&
+             isStr(data.schoolCode, 3, 40) &&
+             isStr(data.schoolOwnerId, 1, 128) &&
+             isStr(data.email, 3, 160) &&
+             isStr(data.emailLower, 3, 160) &&
+             isStr(data.fullName, 1, 120) &&
+             isStr(data.inviteCode, 4, 40) &&
+             data.status in ['pending', 'accepted', 'revoked'] &&
+             isStr(data.invitedBy, 1, 128) &&
+             isOptStr(data, 'acceptedByUid', 128);
     }
 
     function isValidMember(data) {
@@ -165,15 +216,46 @@ service cloud.firestore {
       return isStr(data.schoolId, 1, 128) &&
              isStr(data.schoolName, 1, 160) &&
              isStr(data.schoolOwnerId, 1, 128) &&
-             isStr(data.email, 3, 160) &&
-             isStr(data.emailLower, 3, 160) &&
+             isStr(data.email, 0, 160) &&
+             isStr(data.emailLower, 0, 160) &&
              isStr(data.fullName, 1, 120) &&
              isStr(data.phone, 0, 40) &&
              isStr(data.inviteCode, 4, 40) &&
              isValidPermissionsMap(data.permissions) &&
              data.status in ['pending', 'accepted', 'revoked'] &&
              isStr(data.invitedBy, 1, 128) &&
+             isOptStr(data, 'acceptedByUid', 128) &&
+             isOptStr(data, 'authType', 40) &&
+             isOptStr(data, 'username', 80) &&
+             isOptStr(data, 'usernameLower', 80) &&
+             isOptStr(data, 'accessPassword', 100);
+    }
+
+    function isValidTeacherCredential(data) {
+      return isStr(data.username, 3, 40) &&
+             isStr(data.usernameLower, 3, 40) &&
+             isStr(data.accessPassword, 4, 100) &&
+             isStr(data.inviteCode, 4, 40) &&
+             isStr(data.schoolId, 1, 128) &&
+             isStr(data.schoolName, 1, 160) &&
+             isStr(data.schoolOwnerId, 1, 128) &&
+             data.status in ['pending', 'accepted', 'revoked'] &&
+             isStr(data.invitedBy, 1, 128) &&
              isOptStr(data, 'acceptedByUid', 128);
+    }
+
+    function isValidTeacherRequest(data) {
+      return isStr(data.schoolId, 1, 128) &&
+             isStr(data.schoolOwnerId, 1, 128) &&
+             isStr(data.schoolName, 1, 160) &&
+             isStr(data.userId, 1, 128) &&
+             isStr(data.fullName, 1, 120) &&
+             isStr(data.email, 0, 160) &&
+             isStr(data.phone, 0, 40) &&
+             isStr(data.subjectSpecialty, 0, 120) &&
+             isStr(data.note, 0, 500) &&
+             data.status in ['pending', 'approved', 'rejected'] &&
+             isUidList(data.staffUids, 100);
     }
 
     function isValidTeacherProfile(data) {
@@ -187,7 +269,8 @@ service cloud.firestore {
              isStr(data.joiningDate, 1, 40) &&
              data.isActive is bool &&
              isValidPermissionsMap(data.permissions) &&
-             isUidList(data.staffUids, 100);
+             isUidList(data.staffUids, 100) &&
+             isOptUidList(data, 'memberUids', 500);
     }
 
     function isValidTeacherAssignment(data) {
@@ -229,6 +312,7 @@ service cloud.firestore {
              isStr(data.name, 1, 40) &&
              isOptStr(data, 'classTeacherId', 128) &&
              isStr(data.description, 0, 500) &&
+             isOptStrList(data, 'customLectures', 50, 60) &&
              isUidList(data.staffUids, 100) &&
              isUidList(data.memberUids, 500);
     }
@@ -254,7 +338,8 @@ service cloud.firestore {
              data.status in ['active', 'promoted', 'graduated', 'inactive'] &&
              isOptStr(data, 'previousRecordId', 128) &&
              isOptStr(data, 'linkedUserId', 128) &&
-             isUidList(data.staffUids, 100);
+             isUidList(data.staffUids, 100) &&
+             isOptUidList(data, 'memberUids', 500);
     }
 
     function isValidStudentRequest(data) {
@@ -302,7 +387,8 @@ service cloud.firestore {
              isOptStr(data, 'updatedBy', 128) &&
              data.editHistory is list && data.editHistory.size() <= 50 &&
              (data.editHistory.size() == 0 || data.editHistory[0] is map) &&
-             isUidList(data.staffUids, 100);
+             isUidList(data.staffUids, 100) &&
+             isOptUidList(data, 'memberUids', 500);
     }
 
     function isValidTestExam(data) {
@@ -336,7 +422,8 @@ service cloud.firestore {
              data.passed is bool &&
              (!('rank' in data) || data.rank == null || (data.rank is int && data.rank >= 1)) &&
              isOptStr(data, 'enteredBy', 128) &&
-             isUidList(data.staffUids, 100);
+             isUidList(data.staffUids, 100) &&
+             isOptUidList(data, 'memberUids', 500);
     }
 
     function isValidAnnouncementPost(data) {
@@ -406,6 +493,25 @@ service cloud.firestore {
              isUidList(data.memberUids, 500);
     }
 
+    function isValidClassFee(data) {
+      return isStr(data.schoolId, 1, 128) &&
+             isStr(data.schoolOwnerId, 1, 128) &&
+             isStr(data.sessionId, 1, 128) &&
+             isStr(data.classId, 1, 128) &&
+             isStr(data.sectionId, 1, 128) &&
+             isStr(data.title, 1, 160) &&
+             isStr(data.description, 0, 1000) &&
+             isStr(data.amountText, 0, 40) &&
+             isStr(data.feeDate, 1, 40) &&
+             isOptStrList(data, 'paidStudentIds', 500, 128) &&
+             (!('paidDetails' in data) || data.paidDetails is map) &&
+             isOptStr(data, 'createdBy', 128) &&
+             isStr(data.createdByName, 0, 120) &&
+             isStr(data.updatedByName, 0, 120) &&
+             isUidList(data.staffUids, 100) &&
+             isUidList(data.memberUids, 500);
+    }
+
     function isValidNotification(data) {
       return isStr(data.schoolId, 1, 128) &&
              isStr(data.schoolOwnerId, 1, 128) &&
@@ -417,18 +523,43 @@ service cloud.firestore {
              isOptStr(data, 'referenceId', 128);
     }
 
+    function isValidAppVisit(data) {
+      return isStr(data.userId, 1, 128) &&
+             isStr(data.userEmail, 0, 160) &&
+             isStr(data.userName, 0, 120) &&
+             data.roleIntent in ['principal', 'teacher', 'student'] &&
+             isOptStr(data, 'activeSchoolId', 128) &&
+             isOptStr(data, 'activeSchoolName', 160) &&
+             isStr(data.dayKey, 8, 20) &&
+             isStr(data.monthKey, 5, 16) &&
+             isStr(data.dateSortKey, 8, 20) &&
+             data.hourBucket is int && data.hourBucket >= 0 && data.hourBucket <= 23;
+    }
+
     // --- ROOT COLLECTIONS ---
 
+    match /app_visits/{visitId} {
+      allow get, list, delete: if isSuperAdmin();
+      allow create: if isSignedIn() &&
+                       isValidId(visitId) &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().keys().hasAll(['userId', 'userEmail', 'userName', 'roleIntent', 'dayKey', 'monthKey', 'dateSortKey', 'hourBucket', 'createdAt']) &&
+                       incoming().keys().hasOnly(['userId', 'userEmail', 'userName', 'roleIntent', 'activeSchoolId', 'activeSchoolName', 'dayKey', 'monthKey', 'dateSortKey', 'hourBucket', 'createdAt']) &&
+                       incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                       isValidAppVisit(incoming());
+      allow update: if false;
+    }
+
     match /users/{userId} {
-      allow get: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
-      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow get: if isSuperAdmin() || (isSignedIn() && isValidId(userId) && request.auth.uid == userId);
+      allow list: if isSuperAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
 
       allow create: if isSignedIn() &&
                        isValidId(userId) &&
                        request.auth.uid == userId &&
                        incoming().userId == request.auth.uid &&
                        incoming().keys().hasAll(['userId', 'fullName', 'email', 'phone', 'accountIntent', 'createdAt', 'updatedAt']) &&
-                       incoming().keys().hasOnly(['userId', 'fullName', 'email', 'phone', 'avatarUrl', 'accountIntent', 'activeSchoolId', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'fullName', 'email', 'phone', 'avatarUrl', 'accountIntent', 'activeSchoolId', 'pinnedSchoolIds', 'createdAt', 'updatedAt']) &&
                        isTimestampsCreate(incoming()) &&
                        isValidUserProfile(incoming());
 
@@ -437,10 +568,11 @@ service cloud.firestore {
                        request.auth.uid == userId &&
                        isValidUserProfile(incoming()) &&
                        incoming().userId == existing().userId &&
+                       (existing().accountIntent != 'student' || incoming().accountIntent == 'student') &&
                        isTimestampsUpdate() &&
-                       incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'email', 'phone', 'avatarUrl', 'accountIntent', 'activeSchoolId', 'updatedAt']);
+                       incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'email', 'phone', 'avatarUrl', 'accountIntent', 'activeSchoolId', 'pinnedSchoolIds', 'updatedAt']);
 
-      allow delete: if false;
+      allow delete: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
     }
 
     match /principal_locks/{userId} {
@@ -449,22 +581,30 @@ service cloud.firestore {
       allow create: if isSignedIn() &&
                        isValidId(userId) &&
                        request.auth.uid == userId &&
+                       !isStudentAccountLocked(request.auth.uid) &&
                        incoming().userId == request.auth.uid &&
                        incoming().keys().hasAll(['userId', 'schoolId', 'createdAt']) &&
                        incoming().keys().hasOnly(['userId', 'schoolId', 'createdAt']) &&
                        !exists(/databases/$(database)/documents/principal_locks/$(userId)) &&
                        isValidPrincipalLock(incoming());
-      allow update, delete: if false;
+      allow update: if false;
+      allow delete: if isSignedIn() &&
+                       isValidId(userId) && (
+                         request.auth.uid == userId ||
+                         (exists(/databases/$(database)/documents/schools/$(existing().schoolId)) &&
+                          schoolDoc(existing().schoolId).data.ownerId == request.auth.uid)
+                       );
     }
 
     match /school_directory/{schoolCode} {
       allow get: if isSignedIn() && isValidId(schoolCode);
-      allow list: if isSignedIn() && resource.data.isPublic == true;
+      allow list: if isSuperAdmin() || (isSignedIn() && resource.data.isPublic == true);
 
       allow create: if isSignedIn() &&
                        isValidId(schoolCode) &&
                        incoming().ownerId == request.auth.uid &&
                        incoming().schoolCode == schoolCode &&
+                       incoming().isPublic == true &&
                        incoming().keys().hasAll(['schoolId', 'schoolCode', 'ownerId', 'name', 'schoolType', 'city', 'isPublic', 'createdAt', 'updatedAt']) &&
                        incoming().keys().hasOnly(['schoolId', 'schoolCode', 'ownerId', 'name', 'schoolType', 'city', 'isPublic', 'createdAt', 'updatedAt']) &&
                        isTimestampsCreate(incoming()) &&
@@ -474,22 +614,75 @@ service cloud.firestore {
       allow update: if isSignedIn() &&
                        isValidId(schoolCode) &&
                        isValidSchoolDirectory(incoming()) &&
-                       existing().ownerId == request.auth.uid &&
-                       incoming().ownerId == existing().ownerId &&
                        incoming().schoolId == existing().schoolId &&
                        incoming().schoolCode == existing().schoolCode &&
-                       isTimestampsUpdate() &&
-                       incoming().diff(existing()).affectedKeys().hasOnly(['name', 'schoolType', 'city', 'updatedAt']);
+                       isTimestampsUpdate() && (
+                         (existing().ownerId == request.auth.uid &&
+                          incoming().ownerId == existing().ownerId &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'schoolType', 'city', 'isPublic', 'updatedAt'])) ||
+                         (isSchoolTeacher(existing().schoolId) &&
+                          incoming().ownerId == existing().ownerId &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'schoolType', 'city', 'updatedAt'])) ||
+                         (incoming().ownerId == request.auth.uid &&
+                          getAfter(/databases/$(database)/documents/schools/$(existing().schoolId)).data.ownerId == request.auth.uid &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['ownerId', 'updatedAt'])) ||
+                         (isSuperAdmin() &&
+                          incoming().ownerId == existing().ownerId &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['isPublic', 'updatedAt']))
+                       );
 
-      allow delete: if false;
+      allow delete: if isSignedIn() && isValidId(schoolCode) && (existing().ownerId == request.auth.uid || isSuperAdmin());
+    }
+
+    match /principal_invitations/{inviteCode} {
+      allow get: if isSignedIn() && isValidId(inviteCode);
+      allow list: if isSuperAdmin() || (isSignedIn() && (
+        resource.data.schoolOwnerId == request.auth.uid ||
+        isSchoolPrincipal(resource.data.schoolId) ||
+        (('email' in request.auth.token) && request.auth.token.email_verified == true && resource.data.emailLower == request.auth.token.email.lower())
+      ));
+
+      allow create: if isSignedIn() &&
+                       isValidId(inviteCode) &&
+                       incoming().inviteCode == inviteCode &&
+                       incoming().status == 'pending' &&
+                       incoming().invitedBy == request.auth.uid &&
+                       incoming().schoolOwnerId == request.auth.uid &&
+                       incoming().keys().hasAll(['schoolId', 'schoolName', 'schoolCode', 'schoolOwnerId', 'email', 'emailLower', 'fullName', 'inviteCode', 'status', 'invitedBy', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['schoolId', 'schoolName', 'schoolCode', 'schoolOwnerId', 'email', 'emailLower', 'fullName', 'inviteCode', 'status', 'invitedBy', 'acceptedByUid', 'createdAt', 'updatedAt']) &&
+                       isTimestampsCreate(incoming()) &&
+                       isValidPrincipalInvitation(incoming()) &&
+                       isSchoolPrincipal(incoming().schoolId);
+
+      allow update: if isSignedIn() &&
+                       isValidId(inviteCode) &&
+                       isValidPrincipalInvitation(incoming()) &&
+                       incoming().schoolId == existing().schoolId &&
+                       incoming().inviteCode == existing().inviteCode &&
+                       isTimestampsUpdate() && (
+                         (isSchoolPrincipal(existing().schoolId) &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'schoolOwnerId', 'updatedAt'])) ||
+                         (existing().status == 'pending' &&
+                          !isStudentAccountLocked(request.auth.uid) &&
+                          incoming().status == 'accepted' &&
+                          incoming().schoolOwnerId == existing().schoolOwnerId &&
+                          incoming().acceptedByUid == request.auth.uid &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'acceptedByUid', 'updatedAt']) &&
+                          !exists(/databases/$(database)/documents/principal_locks/$(request.auth.uid)) &&
+                          existsAfter(/databases/$(database)/documents/principal_locks/$(request.auth.uid)) &&
+                          getAfter(/databases/$(database)/documents/schools/$(existing().schoolId)).data.ownerId == request.auth.uid)
+                       );
+
+      allow delete: if isSignedIn() && isValidId(inviteCode) && isSchoolPrincipal(existing().schoolId);
     }
 
     match /teacher_invitations/{inviteCode} {
       allow get: if isSignedIn() && isValidId(inviteCode);
-      allow list: if isSignedIn() && (
+      allow list: if isSuperAdmin() || (isSignedIn() && (
         resource.data.schoolOwnerId == request.auth.uid ||
+        isSchoolPrincipal(resource.data.schoolId) ||
         (('email' in request.auth.token) && request.auth.token.email_verified == true && resource.data.emailLower == request.auth.token.email.lower())
-      );
+      ));
 
       allow create: if isSignedIn() &&
                        isValidId(inviteCode) &&
@@ -498,7 +691,7 @@ service cloud.firestore {
                        incoming().invitedBy == request.auth.uid &&
                        incoming().schoolOwnerId == request.auth.uid &&
                        incoming().keys().hasAll(['schoolId', 'schoolName', 'schoolOwnerId', 'email', 'emailLower', 'fullName', 'phone', 'inviteCode', 'permissions', 'status', 'invitedBy', 'createdAt', 'updatedAt']) &&
-                       incoming().keys().hasOnly(['schoolId', 'schoolName', 'schoolOwnerId', 'email', 'emailLower', 'fullName', 'phone', 'inviteCode', 'permissions', 'status', 'invitedBy', 'acceptedByUid', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['schoolId', 'schoolName', 'schoolOwnerId', 'email', 'emailLower', 'fullName', 'phone', 'inviteCode', 'permissions', 'status', 'invitedBy', 'acceptedByUid', 'authType', 'username', 'usernameLower', 'accessPassword', 'createdAt', 'updatedAt']) &&
                        isTimestampsCreate(incoming()) &&
                        isValidTeacherInvitation(incoming()) &&
                        isSchoolPrincipal(incoming().schoolId);
@@ -507,11 +700,12 @@ service cloud.firestore {
                        isValidId(inviteCode) &&
                        isValidTeacherInvitation(incoming()) &&
                        incoming().schoolId == existing().schoolId &&
-                       incoming().schoolOwnerId == existing().schoolOwnerId &&
                        incoming().inviteCode == existing().inviteCode &&
                        isTimestampsUpdate() && (
-                         (isSchoolPrincipal(existing().schoolId) && existing().status == 'pending' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'permissions', 'updatedAt'])) ||
+                         (isSchoolPrincipal(existing().schoolId) && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'permissions', 'schoolOwnerId', 'updatedAt'])) ||
                          (existing().status == 'pending' &&
+                          !isStudentAccountLocked(request.auth.uid) &&
+                          incoming().schoolOwnerId == existing().schoolOwnerId &&
                           incoming().status == 'accepted' &&
                           incoming().acceptedByUid == request.auth.uid &&
                           incoming().diff(existing()).affectedKeys().hasOnly(['status', 'acceptedByUid', 'updatedAt']) &&
@@ -521,24 +715,83 @@ service cloud.firestore {
       allow delete: if isSignedIn() && isValidId(inviteCode) && isSchoolPrincipal(existing().schoolId);
     }
 
-    // CollectionGroup rule for Student querying their own pending/approved requests across schools
+    match /teacher_credentials/{usernameLower} {
+      allow get: if isSignedIn() && isValidId(usernameLower);
+      allow list: if isSuperAdmin() || (isSignedIn() && (
+        resource.data.schoolOwnerId == request.auth.uid ||
+        isSchoolPrincipal(resource.data.schoolId)
+      ));
+
+      allow create: if isSignedIn() &&
+                       isValidId(usernameLower) &&
+                       incoming().usernameLower == usernameLower &&
+                       incoming().status == 'pending' &&
+                       incoming().invitedBy == request.auth.uid &&
+                       incoming().schoolOwnerId == request.auth.uid &&
+                       isSchoolPrincipal(incoming().schoolId) &&
+                       incoming().keys().hasAll(['username', 'usernameLower', 'accessPassword', 'inviteCode', 'schoolId', 'schoolName', 'schoolOwnerId', 'status', 'invitedBy', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['username', 'usernameLower', 'accessPassword', 'inviteCode', 'schoolId', 'schoolName', 'schoolOwnerId', 'status', 'invitedBy', 'acceptedByUid', 'createdAt', 'updatedAt']) &&
+                       isTimestampsCreate(incoming()) &&
+                       isValidTeacherCredential(incoming()) &&
+                       !exists(/databases/$(database)/documents/teacher_credentials/$(usernameLower));
+
+      allow update: if isSignedIn() &&
+                       isValidId(usernameLower) &&
+                       isValidTeacherCredential(incoming()) &&
+                       incoming().usernameLower == existing().usernameLower &&
+                       incoming().inviteCode == existing().inviteCode &&
+                       incoming().schoolId == existing().schoolId &&
+                       isTimestampsUpdate() && (
+                         (isSchoolPrincipal(existing().schoolId) &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'accessPassword', 'schoolOwnerId', 'updatedAt'])) ||
+                         (existing().status == 'pending' &&
+                          !isStudentAccountLocked(request.auth.uid) &&
+                          incoming().schoolOwnerId == existing().schoolOwnerId &&
+                          incoming().status == 'accepted' &&
+                          incoming().acceptedByUid == request.auth.uid &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'acceptedByUid', 'updatedAt']) &&
+                          existsAfter(/databases/$(database)/documents/schools/$(existing().schoolId)/members/$(request.auth.uid)))
+                       );
+
+      allow delete: if isSignedIn() && isValidId(usernameLower) && isSchoolPrincipal(existing().schoolId);
+    }
+
+    // CollectionGroup rules for users querying their own memberships or requests across schools
+    match /{path=**}/members/{memberUid} {
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+    }
+
     match /{path=**}/student_requests/{requestId} {
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+    }
+
+    match /{path=**}/teacher_requests/{requestId} {
       allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
     }
 
     // --- SCHOOLS & SCHOOL-SCOPED SUBCOLLECTIONS ---
 
     match /schools/{schoolId} {
-      allow get: if isSignedIn() && isValidId(schoolId) && (isSchoolMember(schoolId) || (resource != null && existing().ownerId == request.auth.uid));
-      allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || request.auth.uid in resource.data.memberUids);
+      allow get: if isSuperAdmin() || (isSignedIn() && isValidId(schoolId) && (
+        isSchoolStaff(schoolId) ||
+        isSchoolMember(schoolId) ||
+        (resource != null && existing().ownerId == request.auth.uid) ||
+        (resource != null && (!('isPublic' in existing()) || existing().isPublic == true))
+      ));
+      allow list: if isSuperAdmin() || (isSignedIn() && (
+        resource.data.ownerId == request.auth.uid ||
+        request.auth.uid in resource.data.staffUids ||
+        (request.auth.uid in resource.data.memberUids && (!('isPublic' in resource.data) || resource.data.isPublic == true))
+      ));
 
       allow create: if isSignedIn() &&
                        isValidId(schoolId) &&
+                       !isStudentAccountLocked(request.auth.uid) &&
                        incoming().ownerId == request.auth.uid &&
                        request.auth.uid in incoming().memberUids &&
                        request.auth.uid in incoming().staffUids &&
                        incoming().keys().hasAll(['schoolCode', 'ownerId', 'name', 'schoolType', 'address', 'city', 'contactNumber', 'email', 'description', 'galleryUrls', 'timezone', 'memberUids', 'staffUids', 'createdAt', 'updatedAt']) &&
-                       incoming().keys().hasOnly(['schoolCode', 'ownerId', 'name', 'schoolType', 'address', 'city', 'contactNumber', 'email', 'description', 'establishedYear', 'website', 'logoUrl', 'bannerUrl', 'galleryUrls', 'timezone', 'memberUids', 'staffUids', 'sessionIds', 'classIds', 'sectionIds', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['schoolCode', 'ownerId', 'name', 'schoolType', 'address', 'city', 'contactNumber', 'email', 'description', 'establishedYear', 'website', 'logoUrl', 'bannerUrl', 'galleryUrls', 'timezone', 'memberUids', 'staffUids', 'isPublic', 'sessionIds', 'classIds', 'sectionIds', 'lastAcceptedPrincipalInviteCode', 'createdAt', 'updatedAt']) &&
                        isTimestampsCreate(incoming()) &&
                        isValidSchool(incoming()) &&
                        !exists(/databases/$(database)/documents/principal_locks/$(request.auth.uid)) &&
@@ -548,23 +801,51 @@ service cloud.firestore {
       allow update: if isSignedIn() &&
                        isValidId(schoolId) &&
                        isValidSchool(incoming()) &&
-                       incoming().ownerId == existing().ownerId &&
                        incoming().schoolCode == existing().schoolCode &&
                        isTimestampsUpdate() && (
                          (existing().ownerId == request.auth.uid &&
-                          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'schoolType', 'address', 'city', 'contactNumber', 'email', 'description', 'establishedYear', 'website', 'logoUrl', 'bannerUrl', 'galleryUrls', 'memberUids', 'staffUids', 'sessionIds', 'classIds', 'sectionIds', 'updatedAt'])) ||
+                          incoming().ownerId == existing().ownerId &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'schoolType', 'address', 'city', 'contactNumber', 'email', 'description', 'establishedYear', 'website', 'logoUrl', 'bannerUrl', 'galleryUrls', 'memberUids', 'staffUids', 'isPublic', 'sessionIds', 'classIds', 'sectionIds', 'updatedAt'])) ||
                          (isSchoolTeacher(schoolId) &&
+                          incoming().ownerId == existing().ownerId &&
                           request.auth.uid in incoming().memberUids &&
                           request.auth.uid in incoming().staffUids &&
-                          incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'staffUids', 'sessionIds', 'classIds', 'sectionIds', 'updatedAt']))
+                          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'schoolType', 'address', 'city', 'contactNumber', 'email', 'description', 'establishedYear', 'website', 'logoUrl', 'bannerUrl', 'galleryUrls', 'memberUids', 'staffUids', 'sessionIds', 'classIds', 'sectionIds', 'updatedAt'])) ||
+                         (isSchoolTeacher(schoolId) &&
+                          incoming().ownerId == existing().ownerId &&
+                          !(request.auth.uid in incoming().memberUids) &&
+                          !(request.auth.uid in incoming().staffUids) &&
+                          existing().memberUids.hasAll(incoming().memberUids) &&
+                          existing().staffUids.hasAll(incoming().staffUids) &&
+                          (incoming().memberUids.size() == existing().memberUids.size() - 1 ||
+                           (!(request.auth.uid in existing().memberUids) && incoming().memberUids.size() == existing().memberUids.size())) &&
+                          (incoming().staffUids.size() == existing().staffUids.size() - 1 ||
+                           (!(request.auth.uid in existing().staffUids) && incoming().staffUids.size() == existing().staffUids.size())) &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'staffUids', 'updatedAt'])) ||
+                         (isSuperAdmin() &&
+                          incoming().ownerId == existing().ownerId &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['isPublic', 'updatedAt'])) ||
+                         (incoming().ownerId == request.auth.uid &&
+                          !isStudentAccountLocked(request.auth.uid) &&
+                          existing().ownerId != request.auth.uid &&
+                          request.auth.uid in incoming().memberUids &&
+                          request.auth.uid in incoming().staffUids &&
+                          'lastAcceptedPrincipalInviteCode' in incoming() &&
+                          incoming().lastAcceptedPrincipalInviteCode is string &&
+                          exists(/databases/$(database)/documents/principal_invitations/$(incoming().lastAcceptedPrincipalInviteCode)) &&
+                          get(/databases/$(database)/documents/principal_invitations/$(incoming().lastAcceptedPrincipalInviteCode)).data.schoolId == schoolId &&
+                          get(/databases/$(database)/documents/principal_invitations/$(incoming().lastAcceptedPrincipalInviteCode)).data.status == 'pending' &&
+                          getAfter(/databases/$(database)/documents/principal_invitations/$(incoming().lastAcceptedPrincipalInviteCode)).data.status == 'accepted' &&
+                          getAfter(/databases/$(database)/documents/principal_invitations/$(incoming().lastAcceptedPrincipalInviteCode)).data.acceptedByUid == request.auth.uid &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['ownerId', 'lastAcceptedPrincipalInviteCode', 'memberUids', 'staffUids', 'updatedAt']))
                        );
 
-      allow delete: if false;
+      allow delete: if isSignedIn() && isValidId(schoolId) && existing().ownerId == request.auth.uid;
 
       // Memberships (RBAC source of truth)
       match /members/{memberUid} {
-        allow get: if isSignedIn() && isValidId(memberUid) && (request.auth.uid == memberUid || isSchoolStaff(schoolId));
-        allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || resource.data.schoolOwnerId == request.auth.uid);
+        allow get: if isSuperAdmin() || (isSignedIn() && isValidId(memberUid) && (request.auth.uid == memberUid || isSchoolStaff(schoolId)));
+        allow list: if isSuperAdmin() || (isSignedIn() && (isSchoolPrincipal(schoolId) || resource.data.userId == request.auth.uid || resource.data.schoolOwnerId == request.auth.uid));
 
         allow create: if isSignedIn() &&
                          isValidId(memberUid) &&
@@ -575,43 +856,124 @@ service cloud.firestore {
                          isTimestampsCreate(incoming()) &&
                          isValidMember(incoming()) && (
                            (request.auth.uid == memberUid && incoming().role == 'principal' &&
+                            !isStudentAccountLocked(request.auth.uid) &&
                             incoming().schoolOwnerId == request.auth.uid &&
                             getAfter(/databases/$(database)/documents/schools/$(schoolId)).data.ownerId == request.auth.uid) ||
                            (request.auth.uid == memberUid && incoming().role == 'teacher' &&
+                            !isStudentAccountLocked(request.auth.uid) &&
                             'inviteCode' in incoming() && incoming().inviteCode is string &&
                             exists(/databases/$(database)/documents/teacher_invitations/$(incoming().inviteCode)) &&
                             get(/databases/$(database)/documents/teacher_invitations/$(incoming().inviteCode)).data.status == 'pending' &&
                             get(/databases/$(database)/documents/teacher_invitations/$(incoming().inviteCode)).data.schoolId == schoolId &&
                             getAfter(/databases/$(database)/documents/teacher_invitations/$(incoming().inviteCode)).data.status == 'accepted') ||
-                           (isSchoolPrincipal(schoolId) && incoming().role == 'student')
+                           (request.auth.uid == memberUid && incoming().role == 'student' &&
+                            incoming().status == 'active' &&
+                            exists(/databases/$(database)/documents/schools/$(schoolId)) &&
+                            incoming().schoolOwnerId == schoolDoc(schoolId).data.ownerId &&
+                            isSchoolVisibleToStudent(schoolId)) ||
+                           (isSchoolPrincipal(schoolId) && (
+                             incoming().role == 'student' ||
+                             (incoming().role == 'teacher' && !isStudentAccountLocked(memberUid))
+                           ))
                          );
 
         allow update: if isSignedIn() &&
                          isValidId(memberUid) &&
                          isValidMember(incoming()) &&
-                         isSchoolPrincipal(schoolId) &&
                          incoming().schoolId == existing().schoolId &&
                          incoming().userId == existing().userId &&
-                         isTimestampsUpdate() &&
-                         incoming().diff(existing()).affectedKeys().hasOnly(['status', 'linkedStudentId', 'updatedAt']);
+                         isTimestampsUpdate() && (
+                           (isSchoolPrincipal(schoolId) &&
+                            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'linkedStudentId', 'schoolOwnerId', 'updatedAt'])) ||
+                           (request.auth.uid == memberUid &&
+                            existing().role == 'student' &&
+                            incoming().role == 'student' &&
+                            incoming().status == 'active' &&
+                            existing().status == 'active' &&
+                            incoming().schoolOwnerId == existing().schoolOwnerId &&
+                            isSchoolVisibleToStudent(schoolId) &&
+                            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])) ||
+                           (request.auth.uid == memberUid &&
+                            existing().role != 'student' &&
+                            !isStudentAccountLocked(request.auth.uid) &&
+                            incoming().role == 'teacher' &&
+                            incoming().status == 'active' &&
+                            'inviteCode' in incoming() && incoming().inviteCode is string &&
+                            exists(/databases/$(database)/documents/teacher_invitations/$(incoming().inviteCode)) &&
+                            get(/databases/$(database)/documents/teacher_invitations/$(incoming().inviteCode)).data.status == 'pending' &&
+                            get(/databases/$(database)/documents/teacher_invitations/$(incoming().inviteCode)).data.schoolId == schoolId &&
+                            getAfter(/databases/$(database)/documents/teacher_invitations/$(incoming().inviteCode)).data.status == 'accepted' &&
+                            incoming().diff(existing()).affectedKeys().hasOnly(['schoolOwnerId', 'role', 'status', 'inviteCode', 'updatedAt'])) ||
+                           (request.auth.uid == memberUid &&
+                            existing().role != 'student' &&
+                            !isStudentAccountLocked(request.auth.uid) &&
+                            incoming().role == 'principal' &&
+                            incoming().status == 'active' &&
+                            incoming().schoolOwnerId == request.auth.uid &&
+                            getAfter(/databases/$(database)/documents/schools/$(schoolId)).data.ownerId == request.auth.uid &&
+                            incoming().diff(existing()).affectedKeys().hasOnly(['schoolOwnerId', 'role', 'status', 'inviteCode', 'updatedAt']))
+                         );
 
-        allow delete: if isSignedIn() && isValidId(memberUid) && isSchoolPrincipal(schoolId) && memberUid != existing().schoolOwnerId;
+        allow delete: if isSignedIn() && isValidId(memberUid) && (
+                          isSchoolPrincipal(schoolId) ||
+                          (request.auth.uid == memberUid && existing().role in ['student', 'teacher'])
+                        );
+      }
+
+      // Teacher Self-Service Join Requests
+      match /teacher_requests/{requestId} {
+        allow get: if isSuperAdmin() || (isSignedIn() && isValidId(requestId) && (request.auth.uid == requestId || isSchoolPrincipal(schoolId) || (resource != null && existing().userId == request.auth.uid)));
+        allow list: if isSuperAdmin() || (isSignedIn() && (isSchoolPrincipal(schoolId) || resource.data.userId == request.auth.uid || resource.data.schoolOwnerId == request.auth.uid));
+
+        allow create: if isSignedIn() &&
+                         isValidId(requestId) &&
+                         requestId == request.auth.uid &&
+                         !isStudentAccountLocked(request.auth.uid) &&
+                         incoming().userId == request.auth.uid &&
+                         incoming().schoolId == schoolId &&
+                         incoming().status == 'pending' &&
+                         incoming().keys().hasAll(['schoolId', 'schoolOwnerId', 'schoolName', 'userId', 'fullName', 'email', 'phone', 'subjectSpecialty', 'note', 'status', 'staffUids', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['schoolId', 'schoolOwnerId', 'schoolName', 'userId', 'fullName', 'email', 'phone', 'subjectSpecialty', 'note', 'status', 'staffUids', 'createdAt', 'updatedAt']) &&
+                         isTimestampsCreate(incoming()) &&
+                         isValidTeacherRequest(incoming()) &&
+                         exists(/databases/$(database)/documents/schools/$(schoolId));
+
+        allow update: if isSignedIn() &&
+                         isValidId(requestId) &&
+                         isValidTeacherRequest(incoming()) &&
+                         incoming().schoolId == existing().schoolId &&
+                         incoming().userId == existing().userId &&
+                         isTimestampsUpdate() && (
+                           (isSchoolPrincipal(schoolId) && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'staffUids', 'schoolOwnerId', 'updatedAt'])) ||
+                           (existing().userId == request.auth.uid && incoming().status == 'pending' &&
+                            incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'email', 'phone', 'subjectSpecialty', 'note', 'status', 'updatedAt']))
+                         );
+
+        allow delete: if isSignedIn() && isValidId(requestId) && (existing().userId == request.auth.uid || isSchoolPrincipal(schoolId));
       }
 
       // Teachers
       match /teachers/{teacherId} {
-        allow get: if isSignedIn() && isValidId(teacherId) && (request.auth.uid == teacherId || isSchoolMember(schoolId));
-        allow list: if isSignedIn() && (resource.data.schoolOwnerId == request.auth.uid || request.auth.uid in resource.data.staffUids || resource.data.userId == request.auth.uid);
+        allow get: if isSuperAdmin() || (isSignedIn() && isValidId(teacherId) && (request.auth.uid == teacherId || isSchoolMember(schoolId)));
+        allow list: if isSuperAdmin() || (isSignedIn() && (
+          isSchoolStaff(schoolId) ||
+          isSchoolMember(schoolId) ||
+          resource.data.schoolOwnerId == request.auth.uid ||
+          request.auth.uid in resource.data.staffUids ||
+          (isSchoolVisibleToStudent(schoolId) && ('memberUids' in resource.data) && request.auth.uid in resource.data.memberUids) ||
+          resource.data.userId == request.auth.uid
+        ));
 
         allow create: if isSignedIn() &&
                          isValidId(teacherId) &&
                          incoming().schoolId == schoolId &&
                          incoming().keys().hasAll(['schoolId', 'schoolOwnerId', 'userId', 'fullName', 'email', 'phone', 'joiningDate', 'isActive', 'permissions', 'staffUids', 'createdAt', 'updatedAt']) &&
-                         incoming().keys().hasOnly(['schoolId', 'schoolOwnerId', 'userId', 'fullName', 'email', 'phone', 'avatarUrl', 'joiningDate', 'isActive', 'permissions', 'staffUids', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['schoolId', 'schoolOwnerId', 'userId', 'fullName', 'email', 'phone', 'avatarUrl', 'joiningDate', 'isActive', 'permissions', 'staffUids', 'memberUids', 'createdAt', 'updatedAt']) &&
                          isTimestampsCreate(incoming()) &&
                          isValidTeacherProfile(incoming()) && (
                            isSchoolPrincipal(schoolId) ||
                            (request.auth.uid == teacherId && incoming().userId == request.auth.uid &&
+                            !isStudentAccountLocked(request.auth.uid) &&
                             existsAfter(/databases/$(database)/documents/schools/$(schoolId)/members/$(request.auth.uid)) &&
                             getAfter(/databases/$(database)/documents/schools/$(schoolId)/members/$(request.auth.uid)).data.role == 'teacher')
                          );
@@ -621,17 +983,30 @@ service cloud.firestore {
                          isValidTeacherProfile(incoming()) &&
                          incoming().schoolId == existing().schoolId &&
                          incoming().userId == existing().userId &&
-                         isTimestampsUpdate() &&
-                         isSchoolPrincipal(schoolId) &&
-                         incoming().diff(existing()).affectedKeys().hasOnly(['isActive', 'permissions', 'fullName', 'phone', 'staffUids', 'updatedAt']);
+                         isTimestampsUpdate() && (
+                           (isSchoolPrincipal(schoolId) &&
+                            incoming().diff(existing()).affectedKeys().hasOnly(['isActive', 'permissions', 'fullName', 'phone', 'schoolOwnerId', 'staffUids', 'memberUids', 'updatedAt'])) ||
+                           (isSchoolTeacher(schoolId) &&
+                            incoming().diff(existing()).affectedKeys().hasOnly(['staffUids', 'memberUids', 'updatedAt'])) ||
+                           (request.auth.uid == teacherId &&
+                            incoming().userId == request.auth.uid &&
+                            !isStudentAccountLocked(request.auth.uid) &&
+                            existsAfter(/databases/$(database)/documents/schools/$(schoolId)/members/$(request.auth.uid)) &&
+                            getAfter(/databases/$(database)/documents/schools/$(schoolId)/members/$(request.auth.uid)).data.role == 'teacher' &&
+                            getAfter(/databases/$(database)/documents/schools/$(schoolId)/members/$(request.auth.uid)).data.status == 'active' &&
+                            incoming().diff(existing()).affectedKeys().hasOnly(['schoolOwnerId', 'fullName', 'email', 'phone', 'joiningDate', 'isActive', 'permissions', 'staffUids', 'memberUids', 'updatedAt']))
+                         );
 
-        allow delete: if isSignedIn() && isValidId(teacherId) && isSchoolPrincipal(schoolId);
+        allow delete: if isSignedIn() && isValidId(teacherId) && (
+                          isSchoolPrincipal(schoolId) ||
+                          (request.auth.uid == teacherId && existing().userId == request.auth.uid)
+                        );
       }
 
       // Teacher Assignments
       match /teacher_assignments/{assignmentId} {
-        allow get: if isSignedIn() && isValidId(assignmentId) && isSchoolMember(schoolId);
-        allow list: if isSignedIn() && (resource.data.schoolOwnerId == request.auth.uid || request.auth.uid in resource.data.staffUids);
+        allow get: if isSuperAdmin() || (isSignedIn() && isValidId(assignmentId) && isSchoolMember(schoolId));
+        allow list: if isSuperAdmin() || (isSignedIn() && (isSchoolStaff(schoolId) || isSchoolMember(schoolId) || resource.data.schoolOwnerId == request.auth.uid || request.auth.uid in resource.data.staffUids));
 
         allow create: if isSignedIn() &&
                          isValidId(assignmentId) &&
@@ -640,22 +1015,22 @@ service cloud.firestore {
                          incoming().keys().hasOnly(['schoolId', 'schoolOwnerId', 'sessionId', 'teacherProfileId', 'sectionId', 'subject', 'staffUids', 'createdAt', 'updatedAt']) &&
                          isTimestampsCreate(incoming()) &&
                          isValidTeacherAssignment(incoming()) &&
-                         isSchoolPrincipal(schoolId);
+                         isSchoolStaff(schoolId);
 
         allow update: if isSignedIn() &&
                          isValidId(assignmentId) &&
                          isValidTeacherAssignment(incoming()) &&
-                         isSchoolPrincipal(schoolId) &&
+                         isSchoolStaff(schoolId) &&
                          isTimestampsUpdate() &&
-                         incoming().diff(existing()).affectedKeys().hasOnly(['subject', 'sectionId', 'staffUids', 'updatedAt']);
+                         incoming().diff(existing()).affectedKeys().hasOnly(['subject', 'sectionId', 'schoolOwnerId', 'staffUids', 'updatedAt']);
 
-        allow delete: if isSignedIn() && isValidId(assignmentId) && isSchoolPrincipal(schoolId);
+        allow delete: if isSignedIn() && isValidId(assignmentId) && isSchoolStaff(schoolId);
       }
 
       // Academic Sessions
       match /academic_sessions/{sessionId} {
-        allow get: if isSignedIn() && isValidId(sessionId) && isSchoolMember(schoolId);
-        allow list: if isSignedIn() && (resource.data.schoolOwnerId == request.auth.uid || request.auth.uid in resource.data.staffUids || request.auth.uid in resource.data.memberUids);
+        allow get: if isSuperAdmin() || (isSignedIn() && isValidId(sessionId) && isSchoolMember(schoolId));
+        allow list: if isSuperAdmin() || (isSignedIn() && (isSchoolStaff(schoolId) || isSchoolMember(schoolId) || resource.data.schoolOwnerId == request.auth.uid || request.auth.uid in resource.data.staffUids || (isSchoolVisibleToStudent(schoolId) && request.auth.uid in resource.data.memberUids)));
 
         allow create: if isSignedIn() &&
                          isValidId(sessionId) &&
@@ -664,24 +1039,23 @@ service cloud.firestore {
                          incoming().keys().hasOnly(['schoolId', 'schoolOwnerId', 'name', 'startDate', 'endDate', 'isCurrent', 'staffUids', 'memberUids', 'createdAt', 'updatedAt']) &&
                          isTimestampsCreate(incoming()) &&
                          isValidAcademicSession(incoming()) &&
-                         isSchoolPrincipal(schoolId);
+                         isSchoolStaff(schoolId);
 
         allow update: if isSignedIn() &&
                          isValidId(sessionId) &&
                          isValidAcademicSession(incoming()) &&
                          incoming().schoolId == existing().schoolId &&
-                         isTimestampsUpdate() && (
-                           (isSchoolPrincipal(schoolId) && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'startDate', 'endDate', 'isCurrent', 'staffUids', 'memberUids', 'updatedAt'])) ||
-                           (isSchoolTeacher(schoolId) && request.auth.uid in incoming().staffUids && request.auth.uid in incoming().memberUids && incoming().diff(existing()).affectedKeys().hasOnly(['staffUids', 'memberUids', 'updatedAt']))
-                         );
+                         isTimestampsUpdate() &&
+                         isSchoolStaff(schoolId) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['name', 'startDate', 'endDate', 'isCurrent', 'schoolOwnerId', 'staffUids', 'memberUids', 'updatedAt']);
 
         allow delete: if isSignedIn() && isValidId(sessionId) && isSchoolPrincipal(schoolId);
       }
 
       // Classes
       match /classes/{classId} {
-        allow get: if isSignedIn() && isValidId(classId) && isSchoolMember(schoolId);
-        allow list: if isSignedIn() && (resource.data.schoolOwnerId == request.auth.uid || request.auth.uid in resource.data.staffUids || request.auth.uid in resource.data.memberUids);
+        allow get: if isSuperAdmin() || (isSignedIn() && isValidId(classId) && isSchoolMember(schoolId));
+        allow list: if isSuperAdmin() || (isSignedIn() && (isSchoolStaff(schoolId) || isSchoolMember(schoolId) || resource.data.schoolOwnerId == request.auth.uid || request.auth.uid in resource.data.staffUids || (isSchoolVisibleToStudent(schoolId) && request.auth.uid in resource.data.memberUids)));
 
         allow create: if isSignedIn() &&
                          isValidId(classId) &&
@@ -690,75 +1064,80 @@ service cloud.firestore {
                          incoming().keys().hasOnly(['schoolId', 'schoolOwnerId', 'sessionId', 'name', 'description', 'staffUids', 'memberUids', 'createdAt', 'updatedAt']) &&
                          isTimestampsCreate(incoming()) &&
                          isValidSchoolClass(incoming()) &&
-                         isSchoolPrincipal(schoolId);
+                         isSchoolStaff(schoolId);
 
         allow update: if isSignedIn() &&
                          isValidId(classId) &&
                          isValidSchoolClass(incoming()) &&
                          incoming().schoolId == existing().schoolId &&
-                         isTimestampsUpdate() && (
-                           (isSchoolPrincipal(schoolId) && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'staffUids', 'memberUids', 'updatedAt'])) ||
-                           (isSchoolTeacher(schoolId) && request.auth.uid in incoming().staffUids && request.auth.uid in incoming().memberUids && incoming().diff(existing()).affectedKeys().hasOnly(['staffUids', 'memberUids', 'updatedAt']))
-                         );
+                         isTimestampsUpdate() &&
+                         isSchoolStaff(schoolId) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'schoolOwnerId', 'staffUids', 'memberUids', 'updatedAt']);
 
         allow delete: if isSignedIn() && isValidId(classId) && isSchoolPrincipal(schoolId);
       }
 
       // Sections
       match /sections/{sectionId} {
-        allow get: if isSignedIn() && isValidId(sectionId) && isSchoolMember(schoolId);
-        allow list: if isSignedIn() && (resource.data.schoolOwnerId == request.auth.uid || request.auth.uid in resource.data.staffUids || request.auth.uid in resource.data.memberUids);
+        allow get: if isSuperAdmin() || (isSignedIn() && isValidId(sectionId) && isSchoolMember(schoolId));
+        allow list: if isSuperAdmin() || (isSignedIn() && (isSchoolStaff(schoolId) || isSchoolMember(schoolId) || resource.data.schoolOwnerId == request.auth.uid || request.auth.uid in resource.data.staffUids || (isSchoolVisibleToStudent(schoolId) && request.auth.uid in resource.data.memberUids)));
 
         allow create: if isSignedIn() &&
                          isValidId(sectionId) &&
                          incoming().schoolId == schoolId &&
                          incoming().keys().hasAll(['schoolId', 'schoolOwnerId', 'sessionId', 'classId', 'name', 'description', 'staffUids', 'memberUids', 'createdAt', 'updatedAt']) &&
-                         incoming().keys().hasOnly(['schoolId', 'schoolOwnerId', 'sessionId', 'classId', 'name', 'classTeacherId', 'description', 'staffUids', 'memberUids', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['schoolId', 'schoolOwnerId', 'sessionId', 'classId', 'name', 'classTeacherId', 'description', 'customLectures', 'staffUids', 'memberUids', 'createdAt', 'updatedAt']) &&
                          isTimestampsCreate(incoming()) &&
                          isValidClassSection(incoming()) &&
-                         isSchoolPrincipal(schoolId);
+                         isSchoolStaff(schoolId);
 
         allow update: if isSignedIn() &&
                          isValidId(sectionId) &&
                          isValidClassSection(incoming()) &&
                          incoming().schoolId == existing().schoolId &&
-                         isTimestampsUpdate() && (
-                           (isSchoolPrincipal(schoolId) && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'classTeacherId', 'description', 'staffUids', 'memberUids', 'updatedAt'])) ||
-                           (isSchoolTeacher(schoolId) && request.auth.uid in incoming().staffUids && request.auth.uid in incoming().memberUids && incoming().diff(existing()).affectedKeys().hasOnly(['staffUids', 'memberUids', 'updatedAt']))
-                         );
+                         isTimestampsUpdate() &&
+                         isSchoolStaff(schoolId) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['name', 'classTeacherId', 'description', 'customLectures', 'schoolOwnerId', 'staffUids', 'memberUids', 'updatedAt']);
 
         allow delete: if isSignedIn() && isValidId(sectionId) && isSchoolPrincipal(schoolId);
       }
 
-      // Students
+      // Students (Read-only for approved school members; writable by Principal & active Teachers)
       match /students/{studentId} {
-        allow get: if isSignedIn() && isValidId(studentId) && (isSchoolStaff(schoolId) || existing().linkedUserId == request.auth.uid);
-        allow list: if isSignedIn() && (resource.data.schoolOwnerId == request.auth.uid || request.auth.uid in resource.data.staffUids || resource.data.linkedUserId == request.auth.uid);
+        allow get: if isSuperAdmin() || (isSignedIn() && isValidId(studentId) && isSchoolMember(schoolId));
+        allow list: if isSuperAdmin() || (isSignedIn() && (
+          isSchoolStaff(schoolId) ||
+          isSchoolMember(schoolId) ||
+          resource.data.schoolOwnerId == request.auth.uid ||
+          request.auth.uid in resource.data.staffUids ||
+          (isSchoolVisibleToStudent(schoolId) && ('memberUids' in resource.data) && request.auth.uid in resource.data.memberUids) ||
+          (isSchoolVisibleToStudent(schoolId) && resource.data.linkedUserId == request.auth.uid)
+        ));
 
         allow create: if isSignedIn() &&
                          isValidId(studentId) &&
                          incoming().schoolId == schoolId &&
                          incoming().keys().hasAll(['schoolId', 'schoolOwnerId', 'sessionId', 'classId', 'sectionId', 'studentCode', 'rollNumber', 'fullName', 'fatherName', 'gender', 'parentName', 'parentContact', 'address', 'admissionDate', 'status', 'staffUids', 'createdAt', 'updatedAt']) &&
-                         incoming().keys().hasOnly(['schoolId', 'schoolOwnerId', 'sessionId', 'classId', 'sectionId', 'studentCode', 'rollNumber', 'fullName', 'fatherName', 'dateOfBirth', 'gender', 'parentName', 'parentContact', 'address', 'admissionDate', 'email', 'avatarUrl', 'status', 'previousRecordId', 'linkedUserId', 'staffUids', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['schoolId', 'schoolOwnerId', 'sessionId', 'classId', 'sectionId', 'studentCode', 'rollNumber', 'fullName', 'fatherName', 'dateOfBirth', 'gender', 'parentName', 'parentContact', 'address', 'admissionDate', 'email', 'avatarUrl', 'status', 'previousRecordId', 'linkedUserId', 'staffUids', 'memberUids', 'createdAt', 'updatedAt']) &&
                          isTimestampsCreate(incoming()) &&
                          isValidStudentRecord(incoming()) &&
-                         (isSchoolPrincipal(schoolId) || hasTeacherPermission(schoolId, 'editStudents'));
+                         isSchoolStaff(schoolId);
 
         allow update: if isSignedIn() &&
                          isValidId(studentId) &&
                          isValidStudentRecord(incoming()) &&
                          incoming().schoolId == existing().schoolId &&
                          isTimestampsUpdate() &&
-                         (isSchoolPrincipal(schoolId) || hasTeacherPermission(schoolId, 'editStudents')) &&
-                         incoming().diff(existing()).affectedKeys().hasOnly(['sessionId', 'classId', 'sectionId', 'rollNumber', 'fullName', 'fatherName', 'dateOfBirth', 'gender', 'parentName', 'parentContact', 'address', 'admissionDate', 'email', 'avatarUrl', 'status', 'linkedUserId', 'staffUids', 'updatedAt']);
+                         isSchoolStaff(schoolId) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['sessionId', 'classId', 'sectionId', 'rollNumber', 'fullName', 'fatherName', 'dateOfBirth', 'gender', 'parentName', 'parentContact', 'address', 'admissionDate', 'email', 'avatarUrl', 'status', 'linkedUserId', 'schoolOwnerId', 'staffUids', 'memberUids', 'updatedAt']);
 
-        allow delete: if isSignedIn() && isValidId(studentId) && isSchoolPrincipal(schoolId);
+        allow delete: if isSignedIn() && isValidId(studentId) && isSchoolStaff(schoolId);
       }
 
-      // Student Account Connection Requests
+      // Student Account Connection Requests (Principal approves any request, including outsiders)
       match /student_requests/{requestId} {
-        allow get: if isSignedIn() && isValidId(requestId) && (request.auth.uid == requestId || isSchoolPrincipal(schoolId) || (resource != null && existing().userId == request.auth.uid));
-        allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || resource.data.schoolOwnerId == request.auth.uid);
+        allow get: if isSuperAdmin() || (isSignedIn() && isValidId(requestId) && (request.auth.uid == requestId || isSchoolPrincipal(schoolId) || (resource != null && existing().userId == request.auth.uid)));
+        allow list: if isSuperAdmin() || (isSignedIn() && (isSchoolPrincipal(schoolId) || resource.data.userId == request.auth.uid || resource.data.schoolOwnerId == request.auth.uid));
 
         allow create: if isSignedIn() &&
                          isValidId(requestId) &&
@@ -778,9 +1157,9 @@ service cloud.firestore {
                          incoming().schoolId == existing().schoolId &&
                          incoming().userId == existing().userId &&
                          isTimestampsUpdate() && (
-                           (isSchoolPrincipal(schoolId) && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'studentId', 'sessionId', 'classId', 'sectionId', 'staffUids', 'updatedAt'])) ||
-                           (existing().userId == request.auth.uid && existing().status == 'pending' && incoming().status == 'pending' &&
-                            incoming().diff(existing()).affectedKeys().hasOnly(['requestedRollNumber', 'requestedFullName', 'requestedFatherName', 'requestedSessionName', 'requestedClassName', 'requestedSectionName', 'updatedAt']))
+                           (isSchoolPrincipal(schoolId) && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'studentId', 'sessionId', 'classId', 'sectionId', 'schoolOwnerId', 'staffUids', 'updatedAt'])) ||
+                           (existing().userId == request.auth.uid && incoming().status == 'pending' &&
+                            incoming().diff(existing()).affectedKeys().hasOnly(['requestedRollNumber', 'requestedFullName', 'requestedFatherName', 'requestedSessionName', 'requestedClassName', 'requestedSectionName', 'status', 'updatedAt']))
                          );
 
         allow delete: if isSignedIn() && isValidId(requestId) && (existing().userId == request.auth.uid || isSchoolPrincipal(schoolId));
@@ -788,8 +1167,8 @@ service cloud.firestore {
 
       // Attendance Sessions
       match /attendance_sessions/{attendanceSessionId} {
-        allow get: if isSignedIn() && isValidId(attendanceSessionId) && isSchoolMember(schoolId);
-        allow list: if isSignedIn() && (resource.data.schoolOwnerId == request.auth.uid || request.auth.uid in resource.data.staffUids || request.auth.uid in resource.data.memberUids);
+        allow get: if isSuperAdmin() || (isSignedIn() && isValidId(attendanceSessionId) && isSchoolMember(schoolId));
+        allow list: if isSuperAdmin() || (isSignedIn() && (isSchoolStaff(schoolId) || isSchoolMember(schoolId) || resource.data.schoolOwnerId == request.auth.uid || request.auth.uid in resource.data.staffUids || (isSchoolVisibleToStudent(schoolId) && request.auth.uid in resource.data.memberUids)));
 
         allow create: if isSignedIn() &&
                          isValidId(attendanceSessionId) &&
@@ -798,32 +1177,39 @@ service cloud.firestore {
                          incoming().keys().hasOnly(['schoolId', 'schoolOwnerId', 'sessionId', 'classId', 'sectionId', 'attendanceDate', 'subject', 'sessionSlot', 'teacherId', 'teacherName', 'staffUids', 'memberUids', 'createdAt', 'updatedAt']) &&
                          isTimestampsCreate(incoming()) &&
                          isValidAttendanceSession(incoming()) &&
-                         (isSchoolPrincipal(schoolId) || hasTeacherPermission(schoolId, 'markAttendance'));
+                         isSchoolStaff(schoolId);
 
         allow update: if isSignedIn() &&
                          isValidId(attendanceSessionId) &&
                          isValidAttendanceSession(incoming()) &&
                          incoming().schoolId == existing().schoolId &&
                          isTimestampsUpdate() &&
-                         (isSchoolPrincipal(schoolId) || hasTeacherPermission(schoolId, 'editAttendance')) &&
-                         incoming().diff(existing()).affectedKeys().hasOnly(['subject', 'sessionSlot', 'teacherName', 'staffUids', 'memberUids', 'updatedAt']);
+                         isSchoolStaff(schoolId) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['subject', 'sessionSlot', 'teacherName', 'schoolOwnerId', 'staffUids', 'memberUids', 'updatedAt']);
 
         allow delete: if isSignedIn() && isValidId(attendanceSessionId) && isSchoolPrincipal(schoolId);
       }
 
-      // Attendance Records
+      // Attendance Records (Read-only for approved school members; writable by staff)
       match /attendance_records/{attendanceRecordId} {
-        allow get: if isSignedIn() && isValidId(attendanceRecordId) && (isSchoolStaff(schoolId) || existing().linkedUserId == request.auth.uid);
-        allow list: if isSignedIn() && (resource.data.schoolOwnerId == request.auth.uid || request.auth.uid in resource.data.staffUids || resource.data.linkedUserId == request.auth.uid);
+        allow get: if isSuperAdmin() || (isSignedIn() && isValidId(attendanceRecordId) && isSchoolMember(schoolId));
+        allow list: if isSuperAdmin() || (isSignedIn() && (
+          isSchoolStaff(schoolId) ||
+          isSchoolMember(schoolId) ||
+          resource.data.schoolOwnerId == request.auth.uid ||
+          request.auth.uid in resource.data.staffUids ||
+          (isSchoolVisibleToStudent(schoolId) && ('memberUids' in resource.data) && request.auth.uid in resource.data.memberUids) ||
+          (isSchoolVisibleToStudent(schoolId) && resource.data.linkedUserId == request.auth.uid)
+        ));
 
         allow create: if isSignedIn() &&
                          isValidId(attendanceRecordId) &&
                          incoming().schoolId == schoolId &&
                          incoming().keys().hasAll(['schoolId', 'schoolOwnerId', 'attendanceSessionId', 'studentId', 'status', 'note', 'editHistory', 'staffUids', 'createdAt', 'updatedAt']) &&
-                         incoming().keys().hasOnly(['schoolId', 'schoolOwnerId', 'attendanceSessionId', 'studentId', 'linkedUserId', 'status', 'note', 'updatedBy', 'editHistory', 'staffUids', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['schoolId', 'schoolOwnerId', 'attendanceSessionId', 'studentId', 'linkedUserId', 'status', 'note', 'updatedBy', 'editHistory', 'staffUids', 'memberUids', 'createdAt', 'updatedAt']) &&
                          isTimestampsCreate(incoming()) &&
                          isValidAttendanceRecord(incoming()) &&
-                         (isSchoolPrincipal(schoolId) || hasTeacherPermission(schoolId, 'markAttendance'));
+                         isSchoolStaff(schoolId);
 
         allow update: if isSignedIn() &&
                          isValidId(attendanceRecordId) &&
@@ -832,16 +1218,16 @@ service cloud.firestore {
                          incoming().attendanceSessionId == existing().attendanceSessionId &&
                          incoming().studentId == existing().studentId &&
                          isTimestampsUpdate() &&
-                         (isSchoolPrincipal(schoolId) || hasTeacherPermission(schoolId, 'editAttendance')) &&
-                         incoming().diff(existing()).affectedKeys().hasOnly(['status', 'note', 'updatedBy', 'editHistory', 'linkedUserId', 'staffUids', 'updatedAt']);
+                         isSchoolStaff(schoolId) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['status', 'note', 'updatedBy', 'editHistory', 'linkedUserId', 'schoolOwnerId', 'staffUids', 'memberUids', 'updatedAt']);
 
         allow delete: if isSignedIn() && isValidId(attendanceRecordId) && isSchoolPrincipal(schoolId);
       }
 
-      // Tests & Exams
+      // Tests & Exams (Read-only across all classes for approved school members)
       match /tests/{testId} {
-        allow get: if isSignedIn() && isValidId(testId) && (isSchoolStaff(schoolId) || (isSchoolMember(schoolId) && existing().status == 'published'));
-        allow list: if isSignedIn() && (resource.data.schoolOwnerId == request.auth.uid || request.auth.uid in resource.data.staffUids || (request.auth.uid in resource.data.memberUids && resource.data.status == 'published'));
+        allow get: if isSuperAdmin() || (isSignedIn() && isValidId(testId) && isSchoolMember(schoolId));
+        allow list: if isSuperAdmin() || (isSignedIn() && (isSchoolStaff(schoolId) || isSchoolMember(schoolId) || resource.data.schoolOwnerId == request.auth.uid || request.auth.uid in resource.data.staffUids || (isSchoolVisibleToStudent(schoolId) && request.auth.uid in resource.data.memberUids)));
 
         allow create: if isSignedIn() &&
                          isValidId(testId) &&
@@ -850,33 +1236,39 @@ service cloud.firestore {
                          incoming().keys().hasOnly(['schoolId', 'schoolOwnerId', 'sessionId', 'classId', 'sectionId', 'name', 'subject', 'testDate', 'totalMarks', 'passingMarks', 'description', 'status', 'createdBy', 'approvedBy', 'staffUids', 'memberUids', 'createdAt', 'updatedAt']) &&
                          isTimestampsCreate(incoming()) &&
                          isValidTestExam(incoming()) &&
-                         (isSchoolPrincipal(schoolId) || (hasTeacherPermission(schoolId, 'createTests') && incoming().status == 'draft'));
+                         isSchoolStaff(schoolId);
 
         allow update: if isSignedIn() &&
                          isValidId(testId) &&
                          isValidTestExam(incoming()) &&
                          incoming().schoolId == existing().schoolId &&
-                         isTimestampsUpdate() && (
-                           (isSchoolPrincipal(schoolId) && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'subject', 'testDate', 'totalMarks', 'passingMarks', 'description', 'status', 'approvedBy', 'staffUids', 'memberUids', 'updatedAt'])) ||
-                           (hasTeacherPermission(schoolId, 'createTests') && existing().status != 'published' && incoming().status in ['draft', 'submitted'] && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'subject', 'testDate', 'totalMarks', 'passingMarks', 'description', 'status', 'updatedAt']))
-                         );
+                         isTimestampsUpdate() &&
+                         isSchoolStaff(schoolId) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['name', 'subject', 'testDate', 'totalMarks', 'passingMarks', 'description', 'status', 'approvedBy', 'schoolOwnerId', 'staffUids', 'memberUids', 'updatedAt']);
 
         allow delete: if isSignedIn() && isValidId(testId) && isSchoolPrincipal(schoolId);
       }
 
-      // Test Results
+      // Test Results (Read-only for approved school members; writable by staff)
       match /test_results/{resultId} {
-        allow get: if isSignedIn() && isValidId(resultId) && (isSchoolStaff(schoolId) || existing().linkedUserId == request.auth.uid);
-        allow list: if isSignedIn() && (resource.data.schoolOwnerId == request.auth.uid || request.auth.uid in resource.data.staffUids || resource.data.linkedUserId == request.auth.uid);
+        allow get: if isSuperAdmin() || (isSignedIn() && isValidId(resultId) && isSchoolMember(schoolId));
+        allow list: if isSuperAdmin() || (isSignedIn() && (
+          isSchoolStaff(schoolId) ||
+          isSchoolMember(schoolId) ||
+          resource.data.schoolOwnerId == request.auth.uid ||
+          request.auth.uid in resource.data.staffUids ||
+          (isSchoolVisibleToStudent(schoolId) && ('memberUids' in resource.data) && request.auth.uid in resource.data.memberUids) ||
+          (isSchoolVisibleToStudent(schoolId) && resource.data.linkedUserId == request.auth.uid)
+        ));
 
         allow create: if isSignedIn() &&
                          isValidId(resultId) &&
                          incoming().schoolId == schoolId &&
                          incoming().keys().hasAll(['schoolId', 'schoolOwnerId', 'testId', 'studentId', 'obtainedMarks', 'percentage', 'grade', 'passed', 'staffUids', 'createdAt', 'updatedAt']) &&
-                         incoming().keys().hasOnly(['schoolId', 'schoolOwnerId', 'testId', 'studentId', 'linkedUserId', 'obtainedMarks', 'percentage', 'grade', 'passed', 'rank', 'enteredBy', 'staffUids', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['schoolId', 'schoolOwnerId', 'testId', 'studentId', 'linkedUserId', 'obtainedMarks', 'percentage', 'grade', 'passed', 'rank', 'enteredBy', 'staffUids', 'memberUids', 'createdAt', 'updatedAt']) &&
                          isTimestampsCreate(incoming()) &&
                          isValidTestResult(incoming()) &&
-                         (isSchoolPrincipal(schoolId) || hasTeacherPermission(schoolId, 'enterMarks'));
+                         isSchoolStaff(schoolId);
 
         allow update: if isSignedIn() &&
                          isValidId(resultId) &&
@@ -885,16 +1277,16 @@ service cloud.firestore {
                          incoming().testId == existing().testId &&
                          incoming().studentId == existing().studentId &&
                          isTimestampsUpdate() &&
-                         (isSchoolPrincipal(schoolId) || hasTeacherPermission(schoolId, 'enterMarks')) &&
-                         incoming().diff(existing()).affectedKeys().hasOnly(['obtainedMarks', 'percentage', 'grade', 'passed', 'rank', 'enteredBy', 'linkedUserId', 'staffUids', 'updatedAt']);
+                         isSchoolStaff(schoolId) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['obtainedMarks', 'percentage', 'grade', 'passed', 'rank', 'enteredBy', 'linkedUserId', 'schoolOwnerId', 'staffUids', 'memberUids', 'updatedAt']);
 
         allow delete: if isSignedIn() && isValidId(resultId) && isSchoolPrincipal(schoolId);
       }
 
       // Announcements & Posts
       match /announcements/{announcementId} {
-        allow get: if isSignedIn() && isValidId(announcementId) && isSchoolMember(schoolId);
-        allow list: if isSignedIn() && (resource.data.schoolOwnerId == request.auth.uid || request.auth.uid in resource.data.staffUids || request.auth.uid in resource.data.memberUids);
+        allow get: if isSuperAdmin() || (isSignedIn() && isValidId(announcementId) && isSchoolMember(schoolId));
+        allow list: if isSuperAdmin() || (isSignedIn() && (isSchoolStaff(schoolId) || isSchoolMember(schoolId) || resource.data.schoolOwnerId == request.auth.uid || request.auth.uid in resource.data.staffUids || (isSchoolVisibleToStudent(schoolId) && request.auth.uid in resource.data.memberUids)));
 
         allow create: if isSignedIn() &&
                          isValidId(announcementId) &&
@@ -905,7 +1297,7 @@ service cloud.firestore {
                          incoming().keys().hasOnly(['schoolId', 'schoolOwnerId', 'sessionId', 'classId', 'sectionId', 'scope', 'category', 'title', 'body', 'imageUrl', 'allowComments', 'likesCount', 'publisherId', 'publisherName', 'staffUids', 'memberUids', 'createdAt', 'updatedAt']) &&
                          isTimestampsCreate(incoming()) &&
                          isValidAnnouncementPost(incoming()) &&
-                         (isSchoolPrincipal(schoolId) || (hasTeacherPermission(schoolId, 'publishAnnouncements') && incoming().scope == 'class'));
+                         isSchoolStaff(schoolId);
 
         allow update: if isSignedIn() &&
                          isValidId(announcementId) &&
@@ -913,8 +1305,8 @@ service cloud.firestore {
                          incoming().schoolId == existing().schoolId &&
                          incoming().publisherId == existing().publisherId &&
                          isTimestampsUpdate() && (
-                           ((isSchoolPrincipal(schoolId) || existing().publisherId == request.auth.uid) &&
-                            incoming().diff(existing()).affectedKeys().hasOnly(['category', 'title', 'body', 'imageUrl', 'allowComments', 'staffUids', 'memberUids', 'updatedAt'])) ||
+                           (isSchoolStaff(schoolId) &&
+                            incoming().diff(existing()).affectedKeys().hasOnly(['category', 'title', 'body', 'imageUrl', 'allowComments', 'schoolOwnerId', 'staffUids', 'memberUids', 'updatedAt'])) ||
                            (isSchoolMember(schoolId) &&
                             incoming().diff(existing()).affectedKeys().hasOnly(['likesCount', 'updatedAt']) &&
                             (incoming().likesCount == existing().likesCount + 1 || incoming().likesCount == existing().likesCount - 1))
@@ -923,8 +1315,8 @@ service cloud.firestore {
         allow delete: if isSignedIn() && isValidId(announcementId) && (isSchoolPrincipal(schoolId) || existing().publisherId == request.auth.uid);
 
         match /comments/{commentId} {
-          allow get: if isSignedIn() && isValidId(commentId) && isSchoolMember(schoolId);
-          allow list: if isSignedIn() && (resource.data.schoolOwnerId == request.auth.uid || request.auth.uid in resource.data.memberUids);
+          allow get: if isSuperAdmin() || (isSignedIn() && isValidId(commentId) && isSchoolMember(schoolId));
+          allow list: if isSuperAdmin() || (isSignedIn() && (isSchoolPrincipal(schoolId) || isSchoolMember(schoolId) || resource.data.schoolOwnerId == request.auth.uid || (isSchoolVisibleToStudent(schoolId) && request.auth.uid in resource.data.memberUids)));
 
           allow create: if isSignedIn() &&
                            isValidId(commentId) &&
@@ -938,13 +1330,18 @@ service cloud.firestore {
                            isSchoolMember(schoolId) &&
                            get(/databases/$(database)/documents/schools/$(schoolId)/announcements/$(announcementId)).data.allowComments == true;
 
-          allow update: if false;
+          allow update: if isSignedIn() &&
+                           isValidId(commentId) &&
+                           isSchoolPrincipal(schoolId) &&
+                           isTimestampsUpdate() &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['schoolOwnerId', 'memberUids', 'updatedAt']);
+
           allow delete: if isSignedIn() && isValidId(commentId) && (existing().userId == request.auth.uid || isSchoolPrincipal(schoolId));
         }
 
         match /likes/{userId} {
-          allow get: if isSignedIn() && isValidId(userId) && request.auth.uid == userId && isSchoolMember(schoolId);
-          allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+          allow get: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId && isSchoolMember(schoolId) || isSchoolPrincipal(schoolId));
+          allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isSchoolPrincipal(schoolId));
           allow create: if isSignedIn() &&
                            isValidId(userId) &&
                            request.auth.uid == userId &&
@@ -956,14 +1353,14 @@ service cloud.firestore {
                            isValidAnnouncementLike(incoming()) &&
                            isSchoolMember(schoolId);
           allow update: if false;
-          allow delete: if isSignedIn() && isValidId(userId) && request.auth.uid == userId && isSchoolMember(schoolId);
+          allow delete: if isSignedIn() && isValidId(userId) && ((request.auth.uid == userId && isSchoolMember(schoolId)) || isSchoolPrincipal(schoolId));
         }
       }
 
       // Timetable
       match /timetables/{slotId} {
-        allow get: if isSignedIn() && isValidId(slotId) && isSchoolMember(schoolId);
-        allow list: if isSignedIn() && (resource.data.schoolOwnerId == request.auth.uid || request.auth.uid in resource.data.staffUids || request.auth.uid in resource.data.memberUids);
+        allow get: if isSuperAdmin() || (isSignedIn() && isValidId(slotId) && isSchoolMember(schoolId));
+        allow list: if isSuperAdmin() || (isSignedIn() && (isSchoolStaff(schoolId) || isSchoolMember(schoolId) || resource.data.schoolOwnerId == request.auth.uid || request.auth.uid in resource.data.staffUids || (isSchoolVisibleToStudent(schoolId) && request.auth.uid in resource.data.memberUids)));
 
         allow create: if isSignedIn() &&
                          isValidId(slotId) &&
@@ -979,16 +1376,16 @@ service cloud.firestore {
                          isValidTimetableSlot(incoming()) &&
                          incoming().schoolId == existing().schoolId &&
                          isTimestampsUpdate() &&
-                         isSchoolPrincipal(schoolId) &&
-                         incoming().diff(existing()).affectedKeys().hasOnly(['dayOfWeek', 'subject', 'startTime', 'endTime', 'teacherName', 'roomNumber', 'staffUids', 'memberUids', 'updatedAt']);
+                         isSchoolStaff(schoolId) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['dayOfWeek', 'subject', 'startTime', 'endTime', 'teacherName', 'roomNumber', 'schoolOwnerId', 'staffUids', 'memberUids', 'updatedAt']);
 
         allow delete: if isSignedIn() && isValidId(slotId) && isSchoolStaff(schoolId);
       }
 
       // Homework
       match /homework/{homeworkId} {
-        allow get: if isSignedIn() && isValidId(homeworkId) && isSchoolMember(schoolId);
-        allow list: if isSignedIn() && (resource.data.schoolOwnerId == request.auth.uid || request.auth.uid in resource.data.staffUids || request.auth.uid in resource.data.memberUids);
+        allow get: if isSuperAdmin() || (isSignedIn() && isValidId(homeworkId) && isSchoolMember(schoolId));
+        allow list: if isSuperAdmin() || (isSignedIn() && (isSchoolStaff(schoolId) || isSchoolMember(schoolId) || resource.data.schoolOwnerId == request.auth.uid || request.auth.uid in resource.data.staffUids || (isSchoolVisibleToStudent(schoolId) && request.auth.uid in resource.data.memberUids)));
 
         allow create: if isSignedIn() &&
                          isValidId(homeworkId) &&
@@ -1004,16 +1401,44 @@ service cloud.firestore {
                          isValidHomeworkItem(incoming()) &&
                          incoming().schoolId == existing().schoolId &&
                          isTimestampsUpdate() &&
-                         (isSchoolPrincipal(schoolId) || existing().teacherId == request.auth.uid) &&
-                         incoming().diff(existing()).affectedKeys().hasOnly(['subject', 'title', 'instructions', 'dueDate', 'attachmentUrl', 'staffUids', 'memberUids', 'updatedAt']);
+                         isSchoolStaff(schoolId) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['subject', 'title', 'instructions', 'dueDate', 'attachmentUrl', 'schoolOwnerId', 'staffUids', 'memberUids', 'updatedAt']);
 
-        allow delete: if isSignedIn() && isValidId(homeworkId) && (isSchoolPrincipal(schoolId) || existing().teacherId == request.auth.uid);
+        allow delete: if isSignedIn() && isValidId(homeworkId) && isSchoolStaff(schoolId);
+      }
+
+      // Class Fees (Writable by Principal & active Teachers; read-only for Students when school is public)
+      match /class_fees/{feeId} {
+        allow get: if isSuperAdmin() || (isSignedIn() && isValidId(feeId) && isSchoolMember(schoolId));
+        allow list: if isSuperAdmin() || (isSignedIn() && (isSchoolStaff(schoolId) || isSchoolMember(schoolId) || resource.data.schoolOwnerId == request.auth.uid || request.auth.uid in resource.data.staffUids || (isSchoolVisibleToStudent(schoolId) && request.auth.uid in resource.data.memberUids)));
+
+        allow create: if isSignedIn() &&
+                         isValidId(feeId) &&
+                         incoming().schoolId == schoolId &&
+                         incoming().keys().hasAll(['schoolId', 'schoolOwnerId', 'sessionId', 'classId', 'sectionId', 'title', 'description', 'amountText', 'feeDate', 'paidStudentIds', 'createdByName', 'updatedByName', 'staffUids', 'memberUids', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['schoolId', 'schoolOwnerId', 'sessionId', 'classId', 'sectionId', 'title', 'description', 'amountText', 'feeDate', 'paidStudentIds', 'paidDetails', 'createdBy', 'createdByName', 'updatedByName', 'staffUids', 'memberUids', 'createdAt', 'updatedAt']) &&
+                         isTimestampsCreate(incoming()) &&
+                         isValidClassFee(incoming()) &&
+                         isSchoolStaff(schoolId);
+
+        allow update: if isSignedIn() &&
+                         isValidId(feeId) &&
+                         isValidClassFee(incoming()) &&
+                         incoming().schoolId == existing().schoolId &&
+                         incoming().sessionId == existing().sessionId &&
+                         incoming().classId == existing().classId &&
+                         incoming().sectionId == existing().sectionId &&
+                         isTimestampsUpdate() &&
+                         isSchoolStaff(schoolId) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'amountText', 'feeDate', 'paidStudentIds', 'paidDetails', 'updatedByName', 'schoolOwnerId', 'staffUids', 'memberUids', 'updatedAt']);
+
+        allow delete: if isSignedIn() && isValidId(feeId) && isSchoolStaff(schoolId);
       }
 
       // Notifications
       match /notifications/{notificationId} {
-        allow get: if isSignedIn() && isValidId(notificationId) && existing().userId == request.auth.uid;
-        allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || resource.data.schoolOwnerId == request.auth.uid);
+        allow get: if isSuperAdmin() || (isSignedIn() && isValidId(notificationId) && (existing().userId == request.auth.uid || isSchoolPrincipal(schoolId)));
+        allow list: if isSuperAdmin() || (isSignedIn() && (isSchoolPrincipal(schoolId) || resource.data.userId == request.auth.uid || resource.data.schoolOwnerId == request.auth.uid));
 
         allow create: if isSignedIn() &&
                          isValidId(notificationId) &&
@@ -1027,11 +1452,14 @@ service cloud.firestore {
         allow update: if isSignedIn() &&
                          isValidId(notificationId) &&
                          isValidNotification(incoming()) &&
-                         existing().userId == request.auth.uid &&
                          incoming().userId == existing().userId &&
                          incoming().schoolId == existing().schoolId &&
-                         isTimestampsUpdate() &&
-                         incoming().diff(existing()).affectedKeys().hasOnly(['isRead', 'updatedAt']);
+                         isTimestampsUpdate() && (
+                           (existing().userId == request.auth.uid &&
+                            incoming().diff(existing()).affectedKeys().hasOnly(['isRead', 'updatedAt'])) ||
+                           (isSchoolPrincipal(schoolId) &&
+                            incoming().diff(existing()).affectedKeys().hasOnly(['schoolOwnerId', 'updatedAt']))
+                         );
 
         allow delete: if isSignedIn() && isValidId(notificationId) && (existing().userId == request.auth.uid || isSchoolPrincipal(schoolId));
       }

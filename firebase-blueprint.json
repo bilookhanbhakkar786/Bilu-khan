@@ -67,10 +67,33 @@
         "timezone": { "type": "string" },
         "memberUids": { "type": "array" },
         "staffUids": { "type": "array" },
+        "isPublic": { "type": "boolean" },
+        "lastAcceptedPrincipalInviteCode": { "type": "string" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["schoolCode", "ownerId", "name", "schoolType", "address", "city", "contactNumber", "email", "description", "galleryUrls", "timezone", "memberUids", "staffUids", "createdAt", "updatedAt"]
+    },
+    "PrincipalInvitation": {
+      "title": "PrincipalInvitation",
+      "description": "Principal transfer/replacement invitation stored at principal_invitations/{inviteCode}.",
+      "type": "object",
+      "properties": {
+        "schoolId": { "type": "string" },
+        "schoolName": { "type": "string" },
+        "schoolCode": { "type": "string" },
+        "schoolOwnerId": { "type": "string" },
+        "email": { "type": "string" },
+        "emailLower": { "type": "string" },
+        "fullName": { "type": "string" },
+        "inviteCode": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "accepted", "revoked"] },
+        "invitedBy": { "type": "string" },
+        "acceptedByUid": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["schoolId", "schoolName", "schoolCode", "schoolOwnerId", "email", "emailLower", "fullName", "inviteCode", "status", "invitedBy", "createdAt", "updatedAt"]
     },
     "SchoolMembership": {
       "title": "SchoolMembership",
@@ -91,7 +114,7 @@
     },
     "TeacherInvitation": {
       "title": "TeacherInvitation",
-      "description": "Principal-issued teacher invitation stored at teacher_invitations/{inviteCode}.",
+      "description": "Principal-issued shareable teacher invite link/code stored at teacher_invitations/{inviteCode}. Email is optional for shareable link invites.",
       "type": "object",
       "properties": {
         "schoolId": { "type": "string" },
@@ -196,6 +219,7 @@
         "name": { "type": "string" },
         "classTeacherId": { "type": "string" },
         "description": { "type": "string" },
+        "customLectures": { "type": "array" },
         "staffUids": { "type": "array" },
         "memberUids": { "type": "array" },
         "createdAt": { "type": "string", "format": "date-time" },
@@ -229,10 +253,32 @@
         "previousRecordId": { "type": "string" },
         "linkedUserId": { "type": "string" },
         "staffUids": { "type": "array" },
+        "memberUids": { "type": "array" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["schoolId", "schoolOwnerId", "sessionId", "classId", "sectionId", "studentCode", "rollNumber", "fullName", "fatherName", "gender", "parentName", "parentContact", "address", "admissionDate", "status", "staffUids", "createdAt", "updatedAt"]
+    },
+    "TeacherJoinRequest": {
+      "title": "TeacherJoinRequest",
+      "description": "Self-service teacher join request submitted under schools/{schoolId}/teacher_requests/{userId} for Principal approval.",
+      "type": "object",
+      "properties": {
+        "schoolId": { "type": "string" },
+        "schoolOwnerId": { "type": "string" },
+        "schoolName": { "type": "string" },
+        "userId": { "type": "string" },
+        "fullName": { "type": "string" },
+        "email": { "type": "string" },
+        "phone": { "type": "string" },
+        "subjectSpecialty": { "type": "string" },
+        "note": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "staffUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["schoolId", "schoolOwnerId", "schoolName", "userId", "fullName", "email", "phone", "status", "staffUids", "createdAt", "updatedAt"]
     },
     "StudentAccountRequest": {
       "title": "StudentAccountRequest",
@@ -297,6 +343,7 @@
         "updatedBy": { "type": "string" },
         "editHistory": { "type": "array" },
         "staffUids": { "type": "array" },
+        "memberUids": { "type": "array" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -345,6 +392,7 @@
         "rank": { "type": "integer" },
         "enteredBy": { "type": "string" },
         "staffUids": { "type": "array" },
+        "memberUids": { "type": "array" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -467,13 +515,34 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["schoolId", "schoolOwnerId", "userId", "title", "message", "category", "isRead", "createdAt", "updatedAt"]
+    },
+    "AppVisit": {
+      "title": "AppVisit",
+      "description": "Authenticated app visit telemetry record stored under app_visits/{visitId} for Super Admin analytics.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "userName": { "type": "string" },
+        "roleIntent": { "type": "string", "enum": ["principal", "teacher", "student"] },
+        "activeSchoolId": { "type": "string" },
+        "activeSchoolName": { "type": "string" },
+        "dayKey": { "type": "string" },
+        "monthKey": { "type": "string" },
+        "dateSortKey": { "type": "string" },
+        "hourBucket": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "userEmail", "userName", "roleIntent", "dayKey", "monthKey", "dateSortKey", "hourBucket", "createdAt"]
     }
   },
   "firestore": {
+    "/app_visits/{visitId}": { "schema": { "$ref": "#/entities/AppVisit" }, "description": "App visit and traffic telemetry" },
     "/users/{userId}": { "schema": { "$ref": "#/entities/UserProfile" }, "description": "User profile document" },
     "/principal_locks/{userId}": { "schema": { "$ref": "#/entities/PrincipalLock" }, "description": "1-school-per-principal enforcement lock" },
     "/school_directory/{schoolCode}": { "schema": { "$ref": "#/entities/SchoolDirectoryEntry" }, "description": "Public school directory entry" },
     "/teacher_invitations/{inviteCode}": { "schema": { "$ref": "#/entities/TeacherInvitation" }, "description": "Teacher invite codes" },
+    "/principal_invitations/{inviteCode}": { "schema": { "$ref": "#/entities/PrincipalInvitation" }, "description": "Principal transfer invite codes" },
     "/schools/{schoolId}": { "schema": { "$ref": "#/entities/School" }, "description": "School root profile" },
     "/schools/{schoolId}/members/{memberUid}": { "schema": { "$ref": "#/entities/SchoolMembership" }, "description": "School RBAC memberships" },
     "/schools/{schoolId}/teachers/{teacherId}": { "schema": { "$ref": "#/entities/TeacherProfile" }, "description": "School teachers" },
@@ -482,6 +551,7 @@
     "/schools/{schoolId}/classes/{classId}": { "schema": { "$ref": "#/entities/SchoolClass" }, "description": "Classes per session" },
     "/schools/{schoolId}/sections/{sectionId}": { "schema": { "$ref": "#/entities/ClassSection" }, "description": "Class sections" },
     "/schools/{schoolId}/students/{studentId}": { "schema": { "$ref": "#/entities/StudentRecord" }, "description": "Student records" },
+    "/schools/{schoolId}/teacher_requests/{requestId}": { "schema": { "$ref": "#/entities/TeacherJoinRequest" }, "description": "Teacher self-service join requests" },
     "/schools/{schoolId}/student_requests/{requestId}": { "schema": { "$ref": "#/entities/StudentAccountRequest" }, "description": "Student connection requests" },
     "/schools/{schoolId}/attendance_sessions/{attendanceSessionId}": { "schema": { "$ref": "#/entities/AttendanceSession" }, "description": "Attendance sessions" },
     "/schools/{schoolId}/attendance_records/{attendanceRecordId}": { "schema": { "$ref": "#/entities/AttendanceRecord" }, "description": "Attendance records" },

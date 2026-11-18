@@ -60,7 +60,6 @@ import com.example.ui.theme.WarningAmber
 import com.example.ui.theme.WarningAmberBg
 import com.example.ui.viewmodel.HubUiState
 import com.example.ui.viewmodel.HubViewModel
-import java.time.LocalDate
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -71,6 +70,7 @@ fun TestsAndResultsPanel(
 ) {
     val context = LocalContext.current
     val isPrincipal = state.role == UserRole.PRINCIPAL
+    val isStaff = isPrincipal || state.role == UserRole.TEACHER
     val canCreateTest = isPrincipal || state.currentTeacherPermissions.createTests
     val canEnterMarks = isPrincipal || state.currentTeacherPermissions.enterMarks
 
@@ -134,7 +134,7 @@ fun TestsAndResultsPanel(
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(test.name, style = MaterialTheme.typography.titleMedium, color = NavyPrimary)
-                                Text("${test.subject} • $cls-$sec • ${test.testDate}", style = MaterialTheme.typography.bodySmall)
+                                Text("${test.subject} • $cls-$sec • ${AcademicCalculators.formatDisplayDate(test.testDate)}", style = MaterialTheme.typography.bodySmall)
                                 Text("Total: ${test.totalMarks} • Passing: ${test.passingMarks} • Graded: ${results.size} (Passed: $passedCount)", style = MaterialTheme.typography.labelSmall)
                             }
                             StatusPill(
@@ -161,7 +161,7 @@ fun TestsAndResultsPanel(
                             OutlinedButton(onClick = { activeTestSummary = test }) {
                                 Text("Result Summary")
                             }
-                            if (isPrincipal && test.status != "published") {
+                            if (isStaff && test.status != "published") {
                                 Button(onClick = { viewModel.publishTestResults(test) }) {
                                     Icon(Icons.Rounded.Publish, contentDescription = null)
                                     Spacer(Modifier.width(4.dp))
@@ -186,7 +186,7 @@ fun TestsAndResultsPanel(
                                     viewModel.exportPdfAndShare(
                                         context,
                                         "${test.name} - Class Result",
-                                        "${test.subject} • $cls-$sec • ${test.testDate}",
+                                        "${test.subject} • $cls-$sec • ${AcademicCalculators.formatDisplayDate(test.testDate)}",
                                         headers,
                                         rows
                                     )
@@ -248,7 +248,7 @@ private fun CreateTestDialog(
     var selectedSection by remember { mutableStateOf(fixedSection ?: state.sessionSections.firstOrNull()) }
     var name by remember { mutableStateOf("") }
     var subject by remember { mutableStateOf("Mathematics") }
-    var testDate by remember { mutableStateOf(LocalDate.now().toString()) }
+    var testDate by remember { mutableStateOf(AcademicCalculators.todayDisplayDate()) }
     var totalMarks by remember { mutableStateOf("100") }
     var passingMarks by remember { mutableStateOf("40") }
     var desc by remember { mutableStateOf("") }
@@ -275,7 +275,7 @@ private fun CreateTestDialog(
                 Spacer(Modifier.height(6.dp))
                 OutlinedTextField(value = subject, onValueChange = { subject = it }, label = { Text("Subject *") }, modifier = Modifier.fillMaxWidth())
                 Spacer(Modifier.height(6.dp))
-                OutlinedTextField(value = testDate, onValueChange = { testDate = it }, label = { Text("Test Date (YYYY-MM-DD)") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = testDate, onValueChange = { testDate = it }, label = { Text("Test Date (DD-MM-YYYY)") }, modifier = Modifier.fillMaxWidth())
                 Spacer(Modifier.height(6.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(value = totalMarks, onValueChange = { totalMarks = it }, label = { Text("Total Marks") }, modifier = Modifier.weight(1f))
@@ -303,7 +303,9 @@ private fun EnterTestMarksDialog(
     onSave: (Map<String, Double>) -> Unit
 ) {
     val sectionStudents = remember(state.students, test.sectionId) {
-        state.students.filter { it.sectionId == test.sectionId && it.status == "active" }
+        AcademicCalculators.sortStudentsByRoll(
+            state.students.filter { it.sectionId == test.sectionId && it.status == "active" }
+        )
     }
     val existingMap = remember(state.testResults, test.id) {
         state.testResults.filter { it.testId == test.id }.associateBy { it.studentId }

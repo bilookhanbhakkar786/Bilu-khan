@@ -165,9 +165,12 @@ private fun buildReportTable(type: String, state: HubUiState, today: LocalDate):
     return when (type) {
         "Daily Attendance", "Weekly Attendance", "Monthly Attendance", "Annual Attendance" -> {
             val filtered = when (type) {
-                "Daily Attendance" -> sessionsInScope.filter { it.attendanceDate == today.toString() }
-                "Weekly Attendance" -> sessionsInScope.filter { it.attendanceDate >= today.minusDays(7).toString() }
-                "Monthly Attendance" -> sessionsInScope.filter { it.attendanceDate.startsWith(today.toString().take(7)) }
+                "Daily Attendance" -> sessionsInScope.filter { AcademicCalculators.parseFlexibleDate(it.attendanceDate) == today }
+                "Weekly Attendance" -> sessionsInScope.filter {
+                    val d = AcademicCalculators.parseFlexibleDate(it.attendanceDate)
+                    d != null && !d.isBefore(today.minusDays(7))
+                }
+                "Monthly Attendance" -> sessionsInScope.filter { AcademicCalculators.isSameMonth(it.attendanceDate, today) }
                 else -> sessionsInScope
             }
             val rows = filtered.map { s ->
@@ -175,7 +178,7 @@ private fun buildReportTable(type: String, state: HubUiState, today: LocalDate):
                 val cls = state.classes.find { it.id == s.classId }?.name.orEmpty()
                 val sec = state.sections.find { it.id == s.sectionId }?.name.orEmpty()
                 listOf(
-                    s.attendanceDate,
+                    AcademicCalculators.formatDisplayDate(s.attendanceDate),
                     "$cls-$sec",
                     "${s.subject} (${s.sessionSlot})",
                     recs.count { it.status == AttendanceStatus.PRESENT.dbValue }.toString(),
@@ -206,20 +209,22 @@ private fun buildReportTable(type: String, state: HubUiState, today: LocalDate):
                 val recs = state.attendanceRecords.filter { it.attendanceSessionId in secSessions }
                 val p = recs.count { it.status == AttendanceStatus.PRESENT.dbValue }
                 val rate = if (recs.isEmpty()) 0.0 else (p * 100.0) / recs.size
-                listOf("$cls-$sec", secSessions.size.toString(), p.toString(), recs.size.toString(), String.format("%.1f%%", rate))
+                listOf("$cls-${sec.name}", secSessions.size.toString(), p.toString(), recs.size.toString(), String.format("%.1f%%", rate))
             }
             BuiltReport("Session: $sessName", listOf("Class", "Sessions", "Present", "Total Marks", "Rate"), rows)
         }
 
         "Subject-wise Attendance" -> {
             val bySubj = sessionsInScope.groupBy { it.subject }
-            val rows = bySubj.map { (subj, list) ->
-                val ids = list.map { it.id }.toSet()
-                val recs = state.attendanceRecords.filter { it.attendanceSessionId in ids }
-                val p = recs.count { it.status == AttendanceStatus.PRESENT.dbValue }
-                val rate = if (recs.isEmpty()) 0.0 else (p * 100.0) / recs.size
-                listOf(subj, list.size.toString(), p.toString(), recs.size.toString(), String.format("%.1f%%", rate))
-            }
+            val rows = bySubj.entries
+                .sortedWith { a, b -> AcademicCalculators.naturalCompare(a.key, b.key) }
+                .map { (subj, list) ->
+                    val ids = list.map { it.id }.toSet()
+                    val recs = state.attendanceRecords.filter { it.attendanceSessionId in ids }
+                    val p = recs.count { it.status == AttendanceStatus.PRESENT.dbValue }
+                    val rate = if (recs.isEmpty()) 0.0 else (p * 100.0) / recs.size
+                    listOf(subj, list.size.toString(), p.toString(), recs.size.toString(), String.format("%.1f%%", rate))
+                }
             BuiltReport("Session: $sessName", listOf("Subject", "Sessions", "Present", "Records", "Rate"), rows)
         }
 
@@ -228,7 +233,7 @@ private fun buildReportTable(type: String, state: HubUiState, today: LocalDate):
             val rows = tests.map { t ->
                 val res = state.testResults.filter { it.testId == t.id }
                 val avg = if (res.isEmpty()) 0.0 else res.map { it.percentage }.average()
-                listOf(t.name, t.subject, t.testDate, t.status.uppercase(), String.format("%.1f%%", avg))
+                listOf(t.name, t.subject, AcademicCalculators.formatDisplayDate(t.testDate), t.status.uppercase(), String.format("%.1f%%", avg))
             }
             BuiltReport("Session: $sessName", listOf("Test", "Subject", "Date", "Status", "Avg %"), rows)
         }

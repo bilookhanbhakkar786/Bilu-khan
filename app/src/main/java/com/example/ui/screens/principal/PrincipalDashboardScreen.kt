@@ -30,6 +30,7 @@ import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.Campaign
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Class
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.EventAvailable
 import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.HowToReg
@@ -38,6 +39,10 @@ import androidx.compose.material.icons.rounded.PersonOff
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Visibility
+import androidx.compose.material.icons.rounded.VisibilityOff
+import androidx.compose.material.icons.rounded.Visibility
+import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -66,6 +71,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.example.R
+import com.example.data.model.AcademicCalculators
 import com.example.data.model.AttendanceStatus
 import com.example.data.model.UserRole
 import com.example.ui.components.EmptyStateCard
@@ -75,12 +81,15 @@ import com.example.ui.components.ShortcutTile
 import com.example.ui.components.StatMetricCard
 import com.example.ui.components.StatusPill
 import com.example.ui.theme.AbsentRed
+import com.example.ui.theme.AbsentRedBg
 import com.example.ui.theme.NavyDeep
 import com.example.ui.theme.NavyPrimary
 import com.example.ui.theme.PresentGreen
+import com.example.ui.theme.PresentGreenBg
 import com.example.ui.theme.RoyalBlue
 import com.example.ui.theme.SkyAccent
 import com.example.ui.theme.SkySoft
+import androidx.compose.material3.minimumInteractiveComponentSize
 import com.example.ui.viewmodel.HubUiState
 import java.time.LocalDate
 
@@ -90,6 +99,7 @@ enum class WorkspaceSectionRoute {
     STUDENTS,
     TEACHERS,
     ATTENDANCE,
+    ATTENDANCE_FILTER,
     TESTS_RESULTS,
     ANNOUNCEMENTS,
     REPORTS,
@@ -105,16 +115,23 @@ fun PrincipalAndTeacherDashboardScreen(
     state: HubUiState,
     onSelectSession: (String) -> Unit,
     onRefresh: () -> Unit,
-    onNavigate: (WorkspaceSectionRoute) -> Unit
+    onNavigate: (WorkspaceSectionRoute) -> Unit,
+    onEditSchool: (() -> Unit)? = null,
+    onToggleVisibility: ((Boolean) -> Unit)? = null
 ) {
     val school = state.school ?: return
     val isPrincipal = state.role == UserRole.PRINCIPAL
-    val today = LocalDate.now().toString()
+    val isStaff = isPrincipal || state.role == UserRole.TEACHER
+    val todayDate = LocalDate.now()
+    val todayDisplay = AcademicCalculators.todayDisplayDate()
 
-    val todaySessionIds = remember(state.attendanceSessions, state.activeAcademicSession) {
+    val todaySessionIds = remember(state.attendanceSessions, state.activeAcademicSession, todayDisplay) {
         val sid = state.activeAcademicSession?.id
         state.attendanceSessions
-            .filter { it.attendanceDate == today && (sid == null || it.sessionId == sid) }
+            .filter {
+                AcademicCalculators.formatDisplayDate(it.attendanceDate) == todayDisplay &&
+                    (sid == null || it.sessionId == sid)
+            }
             .map { it.id }
             .toSet()
     }
@@ -132,12 +149,14 @@ fun PrincipalAndTeacherDashboardScreen(
         String.format("%.0f%%", pct)
     }
 
-    val upcomingTests = remember(state.tests, state.activeAcademicSession) {
+    val upcomingTests = remember(state.tests, state.activeAcademicSession, todayDate) {
         val sid = state.activeAcademicSession?.id
-        state.tests.filter { (sid == null || it.sessionId == sid) && it.testDate >= today }.take(4)
+        state.tests.filter {
+            (sid == null || it.sessionId == sid) &&
+                (AcademicCalculators.parseFlexibleDate(it.testDate)?.let { d -> !d.isBefore(todayDate) } ?: true)
+        }.take(4)
     }
     val recentPosts = state.announcements.take(4)
-    val pendingStudentRequestsCount = state.studentRequests.count { it.status == "pending" }
 
     Column(
         modifier = Modifier
@@ -183,6 +202,16 @@ fun PrincipalAndTeacherDashboardScreen(
                             modifier = Modifier.align(Alignment.TopEnd),
                             horizontalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
+                            if (isStaff && onEditSchool != null) {
+                                IconButton(
+                                    onClick = onEditSchool,
+                                    modifier = Modifier
+                                        .minimumInteractiveComponentSize()
+                                        .testTag("dashboard_edit_school_button")
+                                ) {
+                                    Icon(Icons.Rounded.Edit, contentDescription = "Edit School", tint = Color.White)
+                                }
+                            }
                             IconButton(
                                 onClick = { onNavigate(WorkspaceSectionRoute.GLOBAL_SEARCH) },
                                 modifier = Modifier.testTag("dashboard_search_button")
@@ -211,7 +240,7 @@ fun PrincipalAndTeacherDashboardScreen(
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
-                                    text = "${if (isPrincipal) "Principal" else "Teacher"} • ID: ${school.schoolCode} • ${school.city}",
+                                    text = "${if (isPrincipal) "Principal" else "Teacher"} • ID: ${school.schoolCode} • ${school.city}${if (!school.isPublic) " • HIDDEN" else ""}",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = Color.White.copy(alpha = 0.86f)
                                 )
@@ -259,7 +288,7 @@ fun PrincipalAndTeacherDashboardScreen(
                                 }
                             )
                         }
-                        if (isPrincipal) {
+                        if (isStaff) {
                             DropdownMenuItem(
                                 text = { Text("+ Manage / New Session") },
                                 onClick = {
@@ -271,12 +300,47 @@ fun PrincipalAndTeacherDashboardScreen(
                     }
                 }
 
-                if (pendingStudentRequestsCount > 0 && (isPrincipal || state.currentTeacherPermissions.editStudents)) {
+                if (isPrincipal && onToggleVisibility != null) {
+                    AssistChip(
+                        onClick = { onToggleVisibility(!school.isPublic) },
+                        label = {
+                            Text(
+                                text = if (school.isPublic) "Hide School" else "School Hidden (Unhide)",
+                                color = if (school.isPublic) NavyPrimary else AbsentRed,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = if (school.isPublic) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
+                                contentDescription = if (school.isPublic) "Hide School" else "Unhide School",
+                                tint = if (school.isPublic) NavyPrimary else AbsentRed,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
+                        modifier = Modifier.testTag("dashboard_visibility_toggle")
+                    )
+                } else if (!school.isPublic) {
                     StatusPill(
-                        label = "$pendingStudentRequestsCount Student Request(s)",
-                        textColor = RoyalBlue,
-                        backgroundColor = SkySoft,
-                        modifier = Modifier.clickable { onNavigate(WorkspaceSectionRoute.TEACHERS) }
+                        label = "HIDDEN FROM STUDENTS",
+                        textColor = AbsentRed,
+                        backgroundColor = AbsentRedBg
+                    )
+                }
+            }
+
+            if (!school.isPublic) {
+                Spacer(Modifier.height(8.dp))
+                Surface(
+                    color = AbsentRedBg,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "This school is hidden from students and public search. Only the Principal and school Teachers can open it.",
+                        color = AbsentRed,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(12.dp)
                     )
                 }
             }
@@ -298,8 +362,8 @@ fun PrincipalAndTeacherDashboardScreen(
                     modifier = Modifier.weight(1f)
                 )
                 StatMetricCard(
-                    title = if (isPrincipal) "Total Teachers" else "My Sections",
-                    value = if (isPrincipal) state.teachers.size.toString() else state.sessionSections.size.toString(),
+                    title = "Total Teachers",
+                    value = state.teachers.size.toString(),
                     icon = Icons.Rounded.Badge,
                     accentColor = NavyPrimary,
                     modifier = Modifier.weight(1f)
@@ -317,7 +381,10 @@ fun PrincipalAndTeacherDashboardScreen(
                     value = todayAttendancePct,
                     icon = Icons.Rounded.EventAvailable,
                     accentColor = PresentGreen,
-                    modifier = Modifier.weight(1f)
+                    subtitle = "Tap for register",
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable { onNavigate(WorkspaceSectionRoute.ATTENDANCE) }
                 )
                 StatMetricCard(
                     title = "Present Today",
@@ -343,7 +410,7 @@ fun PrincipalAndTeacherDashboardScreen(
             )
             Spacer(Modifier.height(10.dp))
 
-            // 9 Shortcuts Grid
+            // Shortcuts Grid
             val shortcuts = buildList {
                 add(Triple("School Profile", Icons.Rounded.Business, WorkspaceSectionRoute.SCHOOL_PROFILE_POSTS))
                 add(Triple("Classes", Icons.Rounded.Class, WorkspaceSectionRoute.CLASSES_SESSIONS))
@@ -351,9 +418,10 @@ fun PrincipalAndTeacherDashboardScreen(
                     add(Triple("Students", Icons.Rounded.Groups, WorkspaceSectionRoute.STUDENTS))
                 }
                 if (isPrincipal) {
-                    add(Triple("Teachers", Icons.Rounded.HowToReg, WorkspaceSectionRoute.TEACHERS))
+                    add(Triple("Teachers & Links", Icons.Rounded.HowToReg, WorkspaceSectionRoute.TEACHERS))
                 }
                 add(Triple("Attendance", Icons.Rounded.EventAvailable, WorkspaceSectionRoute.ATTENDANCE))
+                add(Triple("Att. % Filter", Icons.Rounded.EventAvailable, WorkspaceSectionRoute.ATTENDANCE_FILTER))
                 add(Triple("Tests & Results", Icons.Rounded.Assignment, WorkspaceSectionRoute.TESTS_RESULTS))
                 add(Triple("Announcements", Icons.Rounded.Campaign, WorkspaceSectionRoute.ANNOUNCEMENTS))
                 if (isPrincipal || state.currentTeacherPermissions.viewReports) {
@@ -373,8 +441,8 @@ fun PrincipalAndTeacherDashboardScreen(
                     ShortcutTile(
                         title = title,
                         icon = icon,
-                        badgeCount = if (route == WorkspaceSectionRoute.TEACHERS) pendingStudentRequestsCount else 0,
-                        testTag = "shortcut_${route.name.lowercase()}",
+                        badgeCount = 0,
+                        testTag = "shortcut_${title.lowercase().replace(" ", "_").replace(".", "").replace("&", "and")}",
                         onClick = { onNavigate(route) },
                         modifier = Modifier.weight(1f)
                     )
@@ -407,7 +475,7 @@ fun PrincipalAndTeacherDashboardScreen(
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(test.name, style = MaterialTheme.typography.titleSmall)
-                                Text("${test.subject} • ${test.testDate}", style = MaterialTheme.typography.bodySmall)
+                                Text("${test.subject} • ${AcademicCalculators.formatDisplayDate(test.testDate)}", style = MaterialTheme.typography.bodySmall)
                             }
                             StatusPill(
                                 label = test.status.uppercase(),
@@ -480,14 +548,14 @@ fun PrincipalAndTeacherDashboardScreen(
                 } else {
                     recentAttendance.forEach { att ->
                         Text(
-                            text = "• Attendance recorded: ${att.subject} (${att.sessionSlot}) on ${att.attendanceDate} by ${att.teacherName}",
+                            text = "• Attendance recorded: ${att.subject} (${att.sessionSlot}) on ${AcademicCalculators.formatDisplayDate(att.attendanceDate)} by ${att.teacherName}",
                             style = MaterialTheme.typography.bodySmall,
                             modifier = Modifier.padding(vertical = 3.dp)
                         )
                     }
                     recentHomework.forEach { hw ->
                         Text(
-                            text = "• Homework assigned: ${hw.subject} — ${hw.title} (Due ${hw.dueDate})",
+                            text = "• Homework assigned: ${hw.subject} — ${hw.title} (Due ${AcademicCalculators.formatDisplayDate(hw.dueDate)})",
                             style = MaterialTheme.typography.bodySmall,
                             modifier = Modifier.padding(vertical = 3.dp)
                         )
